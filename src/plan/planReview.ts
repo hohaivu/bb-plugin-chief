@@ -37,13 +37,14 @@ export function createPlanReview<Row extends ReviewRow>(all: () => Row[], get: (
   /** An epic revision is delivered by its ready report, whatever turn state follows: intake refuses any later report, so lookups and intake share this one rule. */
   const epicDelivered = (r: Row) => !!r.plan_epic && !!r.replaces_thread_id && r.last_report_state === "ready";
 
-  /** The planners revising planner P, newest first: one still working, and the one whose plan is in. */
+  /** The planners revising planner P, newest first: one still working, and the one whose plan is in. An archived or deleted revision is never the
+   * delivered target (Chief cannot complete it); a busy delivered one stays the target while it works, and callers wait on `busy`. */
   function revisions(plannerId: string) {
     const rows = all().filter((r) => r.role === "planner" && r.replaces_thread_id === plannerId).reverse();
     return {
       all: rows,
       busy: rows.find((r) => busy(r.state)),
-      ready: rows.find((r) => r.plan_epic ? epicDelivered(r) : (r.state === "ready" || r.state === "complete") && !!r.plan_waves),
+      ready: rows.find((r) => r.plan_epic ? epicDelivered(r) && r.state !== "archived" && r.state !== "deleted" : (r.state === "ready" || r.state === "complete") && !!r.plan_waves),
     };
   }
 
@@ -118,5 +119,11 @@ export function createPlanReview<Row extends ReviewRow>(all: () => Row[], get: (
   /** An advisor whose planner no longer waits on its review (replaced or decided): it cannot be resumed. */
   const advisorStale = (advisor: Row) => !!advisor.plan_thread_id && advisor.advised_at == null && get(advisor.plan_thread_id)?.plan_review !== "required";
 
-  return { advisors, revisions, hasResult, hasPlan, clearsReview, completesOriginal, status, consultRefusal, revisionRefusal, reportGuard, reportRefusal, advisorStale };
+  /** The one advisor that owns missing-Report recovery for planner P: its newest undecided attempt, while no other advisor is in flight and P still waits on it. */
+  function recoveryAdvisor(plannerId: string) {
+    const { inFlight, abandoned } = advisors(plannerId);
+    return !inFlight && abandoned && !advisorStale(abandoned) ? abandoned : undefined;
+  }
+
+  return { advisors, recoveryAdvisor, revisions, hasResult, hasPlan, clearsReview, completesOriginal, status, consultRefusal, revisionRefusal, reportGuard, reportRefusal, advisorStale };
 }

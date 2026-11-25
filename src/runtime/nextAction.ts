@@ -167,8 +167,9 @@ export function createNextAction(ctx: Ctx) {
     if (review.kind !== "changes") return null;
     const { by, busy } = review;
     if (epic) {
-      if (by) return `Epic ${P} was revised by ${by.thread_id}: tell the user ${by.thread_id}'s epic link (bb chief inspect ${by.thread_id}), then chief_complete (threadId: ${by.thread_id}) and chief_complete (threadId: ${P}). Delegate nothing.`;
+      // A busy revision waits even after its ready report: Chief cannot complete it mid-turn.
       if (busy) return `Epic ${P} is being revised by ${busy.thread_id}: wait for ${busy.thread_id}'s ready alert.`;
+      if (by) return `Epic ${P} was revised by ${by.thread_id}: tell the user ${by.thread_id}'s epic link (bb chief inspect ${by.thread_id}), then chief_complete (threadId: ${by.thread_id}) and chief_complete (threadId: ${P}). Delegate nothing.`;
       return `The advisor requested changes to epic ${P}: chief_plan (revises: ${P}, title, mission: revise per the advisor) — the plugin attaches the planner's report and the advice; it gets no second review. Delegate nothing.`;
     }
     if (review.delivered && by) return `Plan ${P} was revised by ${by.thread_id}: delegate ${by.thread_id}'s waves instead.`;
@@ -190,6 +191,12 @@ export function createNextAction(ctx: Ctx) {
     return `Epic ${P} is ready. Run chief_consult (planThreadId: ${P}) once for the advisor's second opinion, then tell the user ${link}. ${never}`;
   }
 
+  /** A delivered epic revision that Chief can complete now (ready or idle, not busy) owns the completion of both threads in Pending. */
+  function revisionOwnsDelivery(planner: ManagedRow): boolean {
+    const { review } = planReview.status(planner);
+    return !!planner.plan_epic && review.kind === "changes" && !!review.by && !review.busy && (review.by.state === "ready" || review.by.state === "idle");
+  }
+
   const missingReportLine = (row: ManagedRow) => `Finished its turn without a chief_report. Inspect it with chief_inspect (threadId: ${row.thread_id}), then chief_continue it asking for its chief_report, or decide yourself.`;
 
   /** A plan advisor's line: the deciding advisor renders its planner's review outcome. An advisor with no decision renders only the
@@ -198,7 +205,7 @@ export function createNextAction(ctx: Ctx) {
     const planner = store.get(row.plan_thread_id!);
     if (!planner) return null;
     if (planReview.advisors(planner.thread_id).decider?.thread_id !== row.thread_id) {
-      return row.advised_at == null && !planReview.advisorStale(row) && ctx.turnMissingReport(row) ? missingReportLine(row) : null;
+      return planReview.recoveryAdvisor(planner.thread_id)?.thread_id === row.thread_id && ctx.turnMissingReport(row) ? missingReportLine(row) : null;
     }
     const { review } = planReview.status(planner);
     if (review.kind === "approved") {
@@ -210,10 +217,11 @@ export function createNextAction(ctx: Ctx) {
     if (review.kind !== "changes") return null;
     const line = planReviewRefusal(planner);
     if (!line) return null;
+    // Pending names the planner's own call once: the advisor's report alert still carries it, with the blocker guidance.
+    if (!forAlert && (nextAction(planner) === line || revisionOwnsDelivery(planner))) return null;
     return row.last_report_state === "blocked"
       ? `Plan advisor blocked: ${clip(row.blocker ?? "", 200)}. That was the plan's one review: escalate to the user if it names a product decision, then ${line}`
-      // Pending names the planner's own call once: the advisor's report alert still carries it.
-      : !forAlert && nextAction(planner) === line ? null : line;
+      : line;
   }
 
   /** A row's single pending call, reused identically in the report intake's alert and
@@ -247,11 +255,17 @@ export function createNextAction(ctx: Ctx) {
     const heldDesign = row.state === "idle" && row.last_report_state === "ready" && schedule.isDesignWave(row);
     const heldEpic = row.state === "idle" && row.role === "planner" && !!row.plan_epic && !!planReview.reportRefusal(row.thread_id);
     // A task plan whose advisor asked for changes is owned by the advisor row's chief_plan revises call, not the recovery line.
-    const reviewOwned = row.role === "planner" && !row.plan_epic && planReview.status(row).review.kind === "changes" && !!planReview.advisors(row.thread_id).decider;
+    const taskReview = row.role === "planner" && !row.plan_epic ? planReview.status(row).review : undefined;
+    const reviewOwned = taskReview?.kind === "changes" && !!taskReview.decider;
     if (!heldDesign && !heldEpic && !reviewOwned && ctx.turnMissingReport(row)) return missingReportLine(row);
     if (row.state !== "ready" && !heldDesign && !heldEpic) return null;
     if (row.role === "planner") {
       if (!planReview.hasPlan(row)) return null;
+      // One Pending owner per plan state: an idle advisor that owns missing-Report recovery, or a delivered epic revision that owns
+      // the completion of both threads, shows the line; this row stays silent. No eligible owner keeps the route below.
+      const advisor = planReview.recoveryAdvisor(row.thread_id);
+      if (advisor && ctx.turnMissingReport(advisor)) return null;
+      if (revisionOwnsDelivery(row)) return null;
       const refusal = planReviewRefusal(row);
       if (refusal) return refusal;
       if (row.plan_epic) return epicPlannerAction(row);
