@@ -11,11 +11,11 @@ export type WorkerKind = z.infer<typeof workerKindSchema>;
 
 /** The role key chief_models stores a per-machine model pick under: the thread roles plus the worker kinds
  * `designer` and `spec-writer`. Explicit, not derived from roleSchema: a worker kind is not a thread role. */
-export const modelRoleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "designer", "spec-writer", "researcher"]);
+export const modelRoleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "designer", "spec-writer", "researcher", "research-helper"]);
 export type ModelRole = z.infer<typeof modelRoleSchema>;
 
-/** A model role with no pick of its own reads another role's pick: no Designer or Spec Writer row inherits the Worker pick. */
-export const MODEL_FALLBACK: Partial<Record<ModelRole, ModelRole>> = { designer: "worker", "spec-writer": "worker" };
+/** A model role with no pick of its own reads another role's pick: no Designer or Spec Writer row inherits the Worker pick, and no Research helper row inherits the Researcher pick. */
+export const MODEL_FALLBACK: Partial<Record<ModelRole, ModelRole>> = { designer: "worker", "spec-writer": "worker", "research-helper": "researcher" };
 
 /** The one read-only rule every non-implementing role shares. Untracked build/test output is not a change. */
 export const READ_ONLY = "do not create, modify, or delete any file the repository tracks, and do not commit or push";
@@ -41,7 +41,7 @@ export const CONTINUE_REMINDERS: Partial<Record<Role, string>> = {
 // A new role needs a NEW appended migration (never an edit to an existing one) that rebuilds both tables whose
 // role list is a CHECK constraint in MIGRATIONS (server.ts):
 //   - managed_threads: the latest rebuild is managed_threads_v4 (role IN chief, planner, worker, reviewer, advisor, researcher).
-//   - chief_models: the latest rebuild is chief_models_v9 (role IN chief, planner, worker, reviewer, advisor, designer, tester, spec-writer, researcher); its tester rows are legacy, never read.
+//   - chief_models: the latest rebuild is chief_models_v10 (role IN chief, planner, worker, reviewer, advisor, designer, tester, spec-writer, researcher, research-helper); its tester rows are legacy, never read.
 
 /** Planners whose plan is being published or whose consult is being admitted: each refuses the other before anything changes. */
 export const planAdmissions = new Set<string>();

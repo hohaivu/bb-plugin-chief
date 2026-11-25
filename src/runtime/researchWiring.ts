@@ -12,6 +12,7 @@ export function createResearchWiring(ctx: Ctx) {
   const { research } = createResearch({
     db, bb, managedRow: ctx.managedRow, terminal, isActiveChief: ctx.isActiveChief, researchSettings: ctx.researchSettings,
     environmentHostId: ctx.environmentHostId, discover: ctx.discover, managedSpawn: ctx.managedSpawn,
+    helperExecution: (hostId, projectId) => ctx.spawnExecution("research-helper", hostId, projectId),
     freshenCheckout: (chief) => ctx.freshenChiefCheckout(chief, "researcher"), projectHost: ctx.projectHost, projectHostId: ctx.projectHostId,
     clip, maxResultLength: MAX_RESULT_LENGTH,
   });

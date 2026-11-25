@@ -46,6 +46,7 @@ export const modelConfigurationSchema = z.object({
       reviewer: modelSelectionSchema.nullable(),
       advisor: modelSelectionSchema.nullable(),
       researcher: modelSelectionSchema.nullable(),
+      "research-helper": modelSelectionSchema.nullable(),
     }),
     /** Roles whose stored pick this machine can no longer serve, so spawns use BB's default. */
     unusable: z.array(modelRoleSchema),

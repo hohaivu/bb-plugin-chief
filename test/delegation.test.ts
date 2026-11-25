@@ -83,6 +83,7 @@ describe("Chief backend", () => {
         designer: null,
         "spec-writer": null,
         researcher: null,
+        "research-helper": null,
       },
       unusable: [],
     }]);

@@ -465,4 +465,9 @@ export const MIGRATIONS = [
     `ALTER TABLE alert_outbox ADD COLUMN uncertain INTEGER NOT NULL DEFAULT 0`,
     // Planner row: 1 for an epic planner (plans the whole epic as issues, reports ready with no plan); revisions inherit it. NULL/0 is a task planner.
     `ALTER TABLE managed_threads ADD COLUMN plan_epic INTEGER`,
+    // A Research helper model pick; no row means the helpers run on the Researcher pick.
+    `CREATE TABLE chief_models_v10 (host_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('chief','planner','worker','reviewer','advisor','designer','tester','spec-writer','researcher','research-helper')), provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host_id, role))`,
+    `INSERT INTO chief_models_v10 SELECT * FROM chief_models`,
+    `DROP TABLE chief_models`,
+    `ALTER TABLE chief_models_v10 RENAME TO chief_models`,
 ];
