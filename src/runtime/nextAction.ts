@@ -212,7 +212,8 @@ export function createNextAction(ctx: Ctx) {
     if (!line) return null;
     return row.last_report_state === "blocked"
       ? `Plan advisor blocked: ${clip(row.blocker ?? "", 200)}. That was the plan's one review: escalate to the user if it names a product decision, then ${line}`
-      : line;
+      // Pending names the planner's own call once: the advisor's report alert still carries it.
+      : !forAlert && nextAction(planner) === line ? null : line;
   }
 
   /** A row's single pending call, reused identically in the report intake's alert and

@@ -34,14 +34,16 @@ export function createPlanReview<Row extends ReviewRow>(all: () => Row[], get: (
   /** A planner worth a next-action line: it carries a task plan's waves or is an epic, whatever its last report says. Wider than hasResult on purpose. */
   const hasPlan = (planner: Row) => !!planner.plan_waves || !!planner.plan_epic;
 
+  /** An epic revision is delivered by its ready report, whatever turn state follows: intake refuses any later report, so lookups and intake share this one rule. */
+  const epicDelivered = (r: Row) => !!r.plan_epic && !!r.replaces_thread_id && r.last_report_state === "ready";
+
   /** The planners revising planner P, newest first: one still working, and the one whose plan is in. */
   function revisions(plannerId: string) {
     const rows = all().filter((r) => r.role === "planner" && r.replaces_thread_id === plannerId).reverse();
     return {
       all: rows,
       busy: rows.find((r) => busy(r.state)),
-      // An epic revision delivered only with a ready report: a superseded blocked attempt is complete too.
-      ready: rows.find((r) => (r.state === "ready" || r.state === "complete") && (r.plan_epic ? r.last_report_state === "ready" : !!r.plan_waves)),
+      ready: rows.find((r) => r.plan_epic ? epicDelivered(r) : (r.state === "ready" || r.state === "complete") && !!r.plan_waves),
     };
   }
 
@@ -108,7 +110,7 @@ export function createPlanReview<Row extends ReviewRow>(all: () => Row[], get: (
     const planner = get(threadId);
     if (!planner?.plan_epic) return null;
     // A revision gets no review: its ready report is its delivery, so a later report must not replace it (a blocked attempt may still retry).
-    if (planner.replaces_thread_id && planner.last_report_state === "ready") return { kind: "delivered" } as const;
+    if (epicDelivered(planner)) return { kind: "delivered" } as const;
     if (planner.plan_review === "approved" || planner.plan_review === "changes") return { kind: "decided", outcome: planner.plan_review } as const;
     return null;
   }

@@ -70,7 +70,9 @@ describe("finished-without-report alert", () => {
     const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
     await call(state, "chief_report", { state: "ready", result: "The plan is sound.", verdict: "approve" }, advisor.threadId);
     await turn(state, planner.threadId, "I stopped");
-    expect(await rosterLine(state, chief.threadId, planner.threadId)).toContain("without a chief_report");
+    const line = await rosterLine(state, chief.threadId, planner.threadId);
+    expect(line).toContain(`chief_inspect (threadId: ${planner.threadId})`);
+    expect(line).toContain("chief_continue");
     expect(await rosterLine(state, chief.threadId, advisor.threadId)).toBeUndefined();
   });
 
@@ -101,7 +103,19 @@ describe("missing-Report recovery precedence", () => {
   };
   const call = (state: S, tool: string, params: object, threadId: string) => state.harness.behavior.callAgentTool(tool, params, { threadId, projectId: "proj_1" });
   const rosterLines = async (state: S, chiefId: string, id: string) => String(await call(state, "chief_roster", {}, chiefId)).split("\n").filter((l) => l.includes(`(${id}):`));
-  const RECOVER = "chief_continue it asking for its chief_report";
+  // The recovery line is the one that inspects the row and offers chief_continue; tool names and the target ID identify it, not prose.
+  const recovers = (line: string | undefined, id: string) => !!line?.includes(`chief_inspect (threadId: ${id})`) && line.includes("chief_continue");
+  // The roster's Pending lines that hold `call`.
+  const pendingWith = async (state: S, chiefId: string, fragment: string) => String(await call(state, "chief_roster", {}, chiefId)).split("\n").filter((l) => l.startsWith("- ") && l.includes(fragment));
+  const epicWithAdvisor = async (state: S, chiefId: string, verdict: "approve" | "request_changes") => {
+    await call(state, "chief_plan", { title: "Epic", mission: "Plan the epic", undesignedReason: "small", epic: true }, chiefId);
+    const planner = (await status(state)).threads.filter((row) => row.role === "planner").at(-1)!;
+    await call(state, "chief_report", { state: "ready", result: "Epic: https://github.com/o/r/issues/1" }, planner.threadId);
+    await call(state, "chief_consult", { planThreadId: planner.threadId, title: "Epic", mission: "Review this epic" }, chiefId);
+    const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
+    await call(state, "chief_report", { state: "ready", result: "Reviewed the epic.", verdict }, advisor.threadId);
+    return { planner, advisor };
+  };
 
   test("an idle advisor with no decision gets one advisor-owned recovery line; continue and a report clear it", async () => {
     const state = await setup();
@@ -113,16 +127,15 @@ describe("missing-Report recovery precedence", () => {
 
     const lines = await rosterLines(state, chief.threadId, advisor.threadId);
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain(RECOVER);
-    expect(lines[0]).toContain(`chief_inspect (threadId: ${advisor.threadId})`);
-    expect((await rosterLines(state, chief.threadId, planner.threadId)).join("\n")).not.toContain(RECOVER);
+    expect(recovers(lines[0], advisor.threadId)).toBe(true);
+    expect(recovers((await rosterLines(state, chief.threadId, planner.threadId)).join("\n"), planner.threadId)).toBe(false);
 
     await call(state, "chief_continue", { threadId: advisor.threadId, instruction: "Report your verdict with chief_report." }, chief.threadId);
     await state.harness.behavior.emitThreadEvent("thread.active", { thread: { ...state.live.get(advisor.threadId)!, status: "active" } });
-    expect((await rosterLines(state, chief.threadId, advisor.threadId)).join("\n")).not.toContain(RECOVER);
+    expect(recovers((await rosterLines(state, chief.threadId, advisor.threadId)).join("\n"), advisor.threadId)).toBe(false);
     await call(state, "chief_report", { state: "ready", result: "The plan is sound.", verdict: "approve" }, advisor.threadId);
     await state.harness.behavior.emitThreadEvent("thread.idle", { thread: { ...state.live.get(advisor.threadId)!, status: "idle" }, lastAssistantText: "done" });
-    expect((await rosterLines(state, chief.threadId, advisor.threadId)).join("\n")).not.toContain(RECOVER);
+    expect(recovers((await rosterLines(state, chief.threadId, advisor.threadId)).join("\n"), advisor.threadId)).toBe(false);
   });
 
   test("a stale advisor (its planner no longer waits on it) gets no continue call", async () => {
@@ -140,24 +153,64 @@ describe("missing-Report recovery precedence", () => {
   test("a decided epic planner idle without a Report keeps its completion route, and chief_consult's refusal names it too", async () => {
     const state = await setup();
     const chief = await start(state);
-    await call(state, "chief_plan", { title: "Epic", mission: "Plan the epic", undesignedReason: "small", epic: true }, chief.threadId);
-    const planner = (await status(state)).threads.filter((row) => row.role === "planner").at(-1)!;
-    await call(state, "chief_report", { state: "ready", result: "Epic: https://github.com/o/r/issues/1" }, planner.threadId);
-    await call(state, "chief_consult", { planThreadId: planner.threadId, title: "Epic", mission: "Review this epic" }, chief.threadId);
-    const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
-    await call(state, "chief_report", { state: "ready", result: "Reviewed the epic.", verdict: "approve" }, advisor.threadId);
+    const { planner, advisor } = await epicWithAdvisor(state, chief.threadId, "approve");
     await activeIdle(state, planner.threadId);
 
     const complete = `chief_complete (threadId: ${planner.threadId})`;
     const lines = await rosterLines(state, chief.threadId, planner.threadId);
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain(complete);
-    expect(lines[0]).not.toContain(RECOVER);
+    expect(recovers(lines[0], planner.threadId)).toBe(false);
     // The advisor row stays silent while the planner shows the one action.
     expect((await rosterLines(state, chief.threadId, advisor.threadId)).join("\n")).not.toContain(complete);
 
     const refusal = await call(state, "chief_consult", { planThreadId: planner.threadId, title: "Epic", mission: "Again" }, chief.threadId).then(() => "", (error: Error) => error.message);
     expect(refusal).toContain(complete);
-    expect(refusal).not.toContain(RECOVER);
+    expect(refusal).not.toContain("chief_continue");
+  });
+
+  test("an idle epic planner whose advisor requested changes has one Pending owner for the revision call; the advisor's alert and consult refusal keep it", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const { planner, advisor } = await epicWithAdvisor(state, chief.threadId, "request_changes");
+    const revise = `chief_plan (revises: ${planner.threadId}`;
+    // The advisor's own report alert carries the call.
+    const alert = state.db.prepare(`SELECT message FROM alert_outbox WHERE dedupe_key LIKE ?`).all(`${advisor.threadId}:report:%`) as { message: string }[];
+    expect(alert.some((row) => row.message.includes(revise))).toBe(true);
+    for (const idle of [false, true]) {
+      if (idle) await activeIdle(state, planner.threadId);
+      const pending = await pendingWith(state, chief.threadId, revise);
+      expect(pending).toHaveLength(1);
+      expect(pending[0]).toContain(`(${planner.threadId}):`);
+      expect(recovers(pending[0], planner.threadId)).toBe(false);
+    }
+    const refusal = await call(state, "chief_consult", { planThreadId: planner.threadId, title: "Epic", mission: "Again" }, chief.threadId).then(() => "", (error: Error) => error.message);
+    expect(refusal).toContain(revise);
+  });
+
+  test("a delivered epic revision that goes active -> idle with no Report stays delivered in Pending, consult and revision admission", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const { planner } = await epicWithAdvisor(state, chief.threadId, "request_changes");
+    await call(state, "chief_plan", { title: "Epic", mission: "Revise it", revises: planner.threadId }, chief.threadId);
+    const revision = (await status(state)).threads.filter((row) => row.role === "planner").at(-1)!;
+    await call(state, "chief_report", { state: "ready", result: "Epic: https://github.com/o/r/issues/2" }, revision.threadId);
+    await activeIdle(state, revision.threadId);
+
+    const complete = [`chief_complete (threadId: ${revision.threadId})`, `chief_complete (threadId: ${planner.threadId})`];
+    const revises = `chief_plan (revises: ${planner.threadId}`;
+    // One delivery route across all of Pending; no revision call anywhere.
+    expect(await pendingWith(state, chief.threadId, revises)).toHaveLength(0);
+    const delivery = await pendingWith(state, chief.threadId, complete[0]);
+    expect(delivery).toHaveLength(2);
+    expect(delivery.every((line) => complete.every((c) => line.includes(c)))).toBe(true);
+    for (const refusal of [
+      await call(state, "chief_consult", { planThreadId: planner.threadId, title: "Epic", mission: "Again" }, chief.threadId).then(() => "", (error: Error) => error.message),
+      await call(state, "chief_plan", { title: "Epic", mission: "Revise again", revises: planner.threadId }, chief.threadId).then(() => "", (error: Error) => error.message),
+    ]) {
+      expect(refusal).toContain(complete[0]);
+      expect(refusal).not.toContain(revises);
+    }
+    expect((await status(state)).threads.filter((row) => row.role === "planner")).toHaveLength(2);
   });
 });
