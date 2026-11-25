@@ -78,6 +78,9 @@ export interface ReviewGate {
 /** The target that owns the gate's one fix run: the reviewer checks out its branch, gate advice names it, and fix admission accepts only it.
  * reviewTargetsFor stores it first (the integrate worker of a horizontal plan, else the earliest wave). */
 export function repairTarget(gate: Pick<ReviewGate, "targets">): GateTarget { return gate.targets[0]!; }
+/** The target that shows the gate's one line in Chief's Pending block: the first target not complete yet, in target order. */
+export const displayTarget = (gate: Pick<ReviewGate, "targets">, stateOf: (threadId: string) => string | undefined) =>
+  gate.targets.find((target) => stateOf(target.threadId) !== "complete")?.threadId;
 // tester_thread_id and corrector_thread_id are legacy: nothing writes them; read only for old gates.
 export type GateActor = "reviewer_thread_id" | "tester_thread_id" | "fixer_thread_id" | "corrector_thread_id";
 const GATE_ACTORS: GateActor[] = ["reviewer_thread_id", "tester_thread_id", "fixer_thread_id", "corrector_thread_id"];
