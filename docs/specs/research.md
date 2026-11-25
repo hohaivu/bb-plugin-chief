@@ -34,7 +34,7 @@ The research domain lets Chief start a read-only researcher thread for one ticke
 | `modelConfiguration`, `setRoleModel` | `src/runtime/host.ts` | Read and write the researcher pick. `modelConfiguration` has no Tester role, and a stored tester row is never read. |
 | `researchChiefInstructions`, `bb.agents.configure` | `src/runtime/host.ts` | Give Chief the research tool and its instruction. |
 | `chief_models_v9` | `src/db/migrations.ts` | Stores the researcher pick and seeds it once. |
-| `judgeModel` | `src/observe/retro.ts` | Reads the researcher pick for the retro judge. |
+| `judgeModel` | `src/observe/retro.ts` | Reads the research helper pick, then the researcher pick, for the retro judge. |
 | `bindDesign` | `src/runtime/delegation.ts` | Creates missing snapshots or reuses existing ones for a new `chief_plan` binding. |
 | `approvedDesign` | `src/runtime/delegation.ts` | Reads the exact bound snapshot pair for revision and `chief_forge_init`. It never creates snapshots or reads live `design.md`. |
 
@@ -169,7 +169,7 @@ AskUserQuestion comes from Claude Code natively. Elsewhere, bb's builtin ask-use
 - `researcher` is a role of `chief_models`. Settings → Chief models by machine edits it with the same picker as Worker. Reason: each role has one model control.
 - `setRoleModel({ role: "researcher", selection })` stores a pick. `selection: null` clears it, and a later start does not re-import it. Reason: the seed runs once, in the migration.
 - At runtime, no code path falls back to Chief's model, Worker's model or a research-mode pick. Reason: each role has one model source.
-- The retro judge (`judgeModel`) reads the researcher pick. Reason: the investigate pick is no longer editable, so the judge follows the researcher pick.
+- The retro judge (`judgeModel`) reads the `research-helper` pick first. When that pick is unset or unusable, it reads the researcher pick. When both are unusable, it uses the BB default. Reason: judging is log reading against a fixed rubric, so the cheaper helper pick runs it when set. See [Retro judge model](../decisions/2026-11-25-retro-judge-helper-pick.md).
 
 ### Helper threads
 

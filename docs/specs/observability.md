@@ -379,7 +379,7 @@ Every Chief artifact goes through `atomicWrite`. The write replaces an existing 
 
 - `RETRO_SCRIPT` is an inline workflow named `chief-retro-judge`. It reads only `args`. It never interpolates text into code.
 - The workflow runs in parallel one `agent()` for each judged thread and one communication `agent()` for the handoff bundle. The total is at most 9 calls, capped by `budget().maxAgentCalls`.
-- The workflow uses the Researcher role model of the host: the `researcher` row of Chief models by machine.
+- The workflow uses the `research-helper` row of Chief models by machine when it is usable. Otherwise it uses the `researcher` row, and then the BB default. See `judgeModel` in `src/observe/retro.ts`.
 - `runWorkflowCli` in `src/research/workflowCli.ts` runs, polls and stops the workflow. Only the retro judge uses it. The function keeps its arguments, its environment, its timeout and its error mapping.
 - Each agent returns scores with labels, reasons and evidence references of the form `thr_x#seq`. It may also return one lesson.
 - The prompt says: return lesson null unless all four filing conditions hold. No change is a valid result.
