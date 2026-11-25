@@ -4,7 +4,7 @@ import { createCheckout } from "../src/runtime/checkout";
 function setup(projects: { get: () => Promise<unknown> }, primaryHostId = "h1") {
   const warn = vi.fn();
   const ctx = { bb: { log: { warn }, sdk: { projects, system: { config: async () => ({ primaryHostId }) } } }, store: {} } as never;
-  return { warn, sync: () => createCheckout(ctx).syncTaskBranch("proj", "feat") };
+  return { warn, sync: (branch = "feat") => createCheckout(ctx).syncTaskBranch("proj", branch) };
 }
 
 afterEach(() => vi.useRealTimers());
@@ -23,6 +23,31 @@ describe("syncTaskBranch lookups", () => {
     await vi.advanceTimersByTimeAsync(31_000);
     await done;
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    ["an empty error", new Error("")],
+    ["a multi-line error", new Error("first\nsecond\r\n  third")],
+    ["a very long error", new Error("x".repeat(5_000))],
+  ])("%s gives one bounded single-line warning", async (_name, error) => {
+    const { warn, sync } = setup({ get: async () => { throw error; } });
+    await sync();
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = String(warn.mock.calls[0][0]);
+    expect(line).not.toMatch(/[\r\n]/);
+    expect(line.length).toBeLessThanOrEqual(400);
+  });
+
+  test.each([
+    ["a multi-line branch", "feat\nsecond\r\nthird", new Error("boom")],
+    ["a 300-character branch with a very long error", "b".repeat(300), new Error("x".repeat(5_000))],
+  ])("%s still gives one line within the limit", async (_name, branch, error) => {
+    const { warn, sync } = setup({ get: async () => { throw error; } });
+    await sync(branch);
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = String(warn.mock.calls[0][0]);
+    expect(line).not.toMatch(/[\r\n]/);
+    expect(line.length).toBeLessThanOrEqual(400);
   });
 
   test.each([
