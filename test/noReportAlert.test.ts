@@ -88,10 +88,10 @@ describe("plan threads keep their base Pending", () => {
     await state.harness.behavior.emitThreadEvent("thread.active", { thread: { ...state.live.get(id)!, status: "active" } });
     await state.harness.behavior.emitThreadEvent("thread.idle", { thread: { ...state.live.get(id)!, status: "idle" }, lastAssistantText: "stopped" });
   };
-  // The whole Pending block: each line as its row's label and the tool names it calls. Labels replace thread IDs.
+  // The whole Pending block: each line as its row's label, the tool names it calls, and each chief_plan revises target. Labels replace thread IDs.
   const pending = async (state: S, chiefId: string, labels: Record<string, string>) => String(await call(state, "chief_roster", {}, chiefId)).split("\n")
     .filter((line) => line.startsWith("- "))
-    .map((line) => `${line.match(/^- (\w+)/)![1]} ${labels[line.match(/\(([^)]+)\):/)![1]] ?? "other"}: ${[...new Set(line.match(/chief_\w+/g))].sort().join(" ")}`);
+    .map((line) => `${line.match(/^- (\w+)/)![1]} ${labels[line.match(/\(([^)]+)\):/)![1]] ?? "other"}: ${[...new Set(line.match(/chief_\w+/g))].sort().join(" ")}${[...line.matchAll(/revises: (thr_\w+)/g)].map((m) => ` revises=${labels[m[1]] ?? "other"}`).join("")}`);
   const planners = async (state: S) => (await status(state)).threads.filter((row) => row.role === "planner");
   const epicWithAdvisor = async (state: S, chiefId: string, verdict: "approve" | "request_changes" | null) => {
     await call(state, "chief_plan", { title: "Epic", mission: "Plan the epic", undesignedReason: "small", epic: true }, chiefId);
@@ -131,7 +131,7 @@ describe("plan threads keep their base Pending", () => {
     await activeIdle(state, revision.threadId);
     expect(await pending(state, chief.threadId, { [planner.threadId]: "original", [revision.threadId]: "revision" })).toMatchInlineSnapshot(`
       [
-        "advisor other: chief_plan",
+        "advisor other: chief_plan revises=original",
       ]
     `);
   });
@@ -143,10 +143,12 @@ describe("plan threads keep their base Pending", () => {
     const revision = await revise(state, chief.threadId, planner.threadId);
     await call(state, "chief_report", { state: "blocked", blocker: "No repo access", recommendation: "Grant it" }, revision.threadId);
     await activeIdle(state, planner.threadId);
-    await activeIdle(state, revision.threadId);
+    const states = Object.fromEntries((await status(state)).threads.map((row) => [row.threadId, row.state]));
+    expect([states[planner.threadId], states[revision.threadId]]).toEqual(["idle", "blocked"]);
     expect(await pending(state, chief.threadId, { [planner.threadId]: "original", [revision.threadId]: "revision" })).toMatchInlineSnapshot(`
       [
-        "advisor other: chief_plan",
+        "planner revision: chief_plan revises=original",
+        "advisor other: chief_plan revises=original",
       ]
     `);
   });
@@ -168,8 +170,8 @@ describe("plan threads keep their base Pending", () => {
     await state.harness.behavior.emitThreadEvent("thread.idle", { thread: { ...state.live.get(revision.threadId)!, status: "idle" }, lastAssistantText: "done" });
     expect(await pending(state, chief.threadId, labels)).toMatchInlineSnapshot(`
       [
-        "advisor other: chief_plan",
-        "planner original: chief_plan",
+        "advisor other: chief_plan revises=original",
+        "planner original: chief_plan revises=original",
       ]
     `);
   });

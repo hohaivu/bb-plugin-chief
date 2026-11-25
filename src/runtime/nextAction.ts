@@ -4,7 +4,7 @@ import { reviewEngine } from "../review/prAgent";
 import { createReviewStart } from "../review/reviewStart";
 import { terminal, type ManagedRow } from "../types";
 import { clip } from "../core/text";
-import { isWriter, type PlanWave } from "../plan/waveSchedule";
+import { isReady, isWriter, type PlanWave } from "../plan/waveSchedule";
 import { BUSY_STATUSES, MAX_NUDGE_LENGTH } from "./constants";
 import { bounded } from "./exec";
 import { forgeEnv, prHead } from "../forge/forge";
@@ -236,7 +236,7 @@ export function createNextAction(ctx: Ctx) {
     if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.${row.role === "worker" ? ` ${inPlaceLine(row)}` : ""}`;
     // A design wave that went ready -> active -> idle without a new report still holds its ready report: chief_owner_approval admits it, so Pending shares its route.
     // That approved-design route (#296) is authoritative and comes before the missing-Report recovery. Recovery covers worker rows only (Worker, Designer, Spec Writer).
-    const heldDesign = row.state === "idle" && row.last_report_state === "ready" && schedule.isDesignWave(row);
+    const heldDesign = row.state === "idle" && isReady(row) && schedule.isDesignWave(row);
     if (row.role === "worker" && !heldDesign && ctx.turnMissingReport(row)) return missingReportLine(row);
     if (row.state !== "ready" && !heldDesign) return null;
     if (row.role === "planner") {
