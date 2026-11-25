@@ -142,7 +142,8 @@ A `chief_report` writes a `report:<active_cycle>:` key for a row with a Chief. T
 - The line tells Chief to inspect the thread, then continue it to ask for its `chief_report`, or decide itself.
 - The line stays on each read until the row reports or starts a new turn. Reason: The alert notifies Chief once. The Pending block must show open work until the cause ends.
 - A row with an earlier role-specific line shows that line, not the Missing-Report line. Reason: A role-specific line holds the recovery step for its own role.
-- A deciding advisor whose planner has an approved plan shows no line in Pending. The planner's own row shows the recovery step while the planner is idle without a Report. Reason: The planner's row holds the recovery step.
+- A task plan whose review is approved shows the Missing-Report line on its planner's row while the planner is idle without a Report. Reason: The planner's row holds the recovery step.
+- An epic whose review is approved keeps its `chief_complete` line on the planner's row while the planner is idle without a Report. It shows no Missing-Report line. Reason: A decided epic refuses any new Report, so the recovery step cannot end its cause.
 - A row that reported shows no Missing-Report line. This covers `ready`, `blocked`, `complete` and an `active` report in the same cycle. Reason: An idle row that reported is not stuck.
 
 ### Precedence
@@ -161,24 +162,44 @@ Three idle rows skip step 2:
 - An idle epic planner whose report intake refuses every report keeps its decision or delivery line in step 3. The refusal covers a decided epic, a delivered revision, and a planner with an advisor in review. Reason: A new `chief_report` cannot be accepted, so a retry line would stall the epic.
 - An idle task planner whose advisor asked for changes shows no line on its own row. Its advisor row holds the one revision call. Reason: Pending names one owner for the revision call.
 
+Step 3 also silences the ready planner's route in two cases. Each case has one owner in Pending instead.
+
+- An idle advisor owns Missing-Report recovery. See Plan advisor.
+- A delivered epic revision can complete now. See Delivered epic revision.
+
 ### Delivered epic revision
 
 An epic revision is delivered by its ready report. Reason: Report intake refuses any later report from it.
 
 - A later idle turn without a Report does not reopen the revision.
-- Pending, `chief_consult` and `chief_plan` (`revises`) read one predicate, `epicDelivered` in `src/plan/planReview.ts`. Reason: Report intake and these routes must agree.
-- Each of these names the same calls: `chief_complete` of the revision and of the original. `chief_plan` refuses a second revision.
+- `revisions()` in `src/plan/planReview.ts` finds the delivered revision. It uses `epicDelivered` and skips archived and deleted rows. Pending, `chief_consult` and `chief_plan` (`revises`) read that lookup. Reason: Report intake and these routes must agree.
+- Pending names one owner for the delivery: the revision's own row, while the revision is ready or idle and not busy. That row names `chief_complete` of the revision and of the original. The original planner and its deciding advisor show no line. Reason: One row names both completions.
+- A busy revision is one that became active after its ready report. Its original planner shows a wait line, and no row names a completion call. Reason: Chief cannot complete a busy thread.
+- An archived or deleted revision that is not completed is no completion target. Pending, `chief_consult` and `chief_plan` then route to a new revision of the original. Reason: Chief cannot complete an archived thread.
+- The `chief_consult` and `chief_plan` refusals name the same call as Pending. Reason: Refusals and Pending must agree.
+- `chief_plan` refuses a second revision while a delivered revision stands. Reason: The delivered revision holds the one call.
 - A blocked revision attempt stays open. Reason: A blocked report does not deliver the revision, so its retry stays valid.
 
 ### Plan advisor
 
-A plan advisor has its own rule.
+A plan advisor has its own rule. A task plan and an epic differ.
 
 - A deciding advisor shows its planner's review line, if one applies. It never shows the Missing-Report line.
-- For a `request_changes` decision, the advisor's row omits the line when the planner's own row shows the same call. The planner's row shows it only while the planner is ready. While the planner is idle without a Report, the advisor's row keeps the call. The advisor's report alert and a blocked advisor's escalation keep the line. Reason: Pending names one owner for the revision call.
-- An approved plan's advisor shows no line in Pending. Its report alert names the approval and the planner's next action, and shows no line while the planner is idle without a Report. Reason: The planner's own row holds the call in Pending and the recovery step while idle.
-- An advisor with no decision (`advised_at` null) shows the Missing-Report line on its own row, when its planner still waits on it. Reason: The advisor's row holds the `chief_continue` call for that advisor, so the line belongs there.
+- An approved plan's deciding advisor shows no line in Pending, for a task plan or an epic. Reason: The planner's row holds the call in Pending.
+- A task plan whose advisor requested changes shows the revision call on the planner's row only while the planner is ready. While the planner is idle without a Report, the deciding advisor's row shows the call. Reason: Pending names one owner for the revision call.
+- An epic whose advisor requested changes shows the revision call on the planner's row, while the planner is ready or idle without a Report. The deciding advisor's row shows no line. Reason: A decided epic refuses any new Report, so its planner's row holds the call.
+- A blocked deciding advisor adds its blocker to the call on its row only when the planner's row shows no call. That happens for an idle task planner. Reason: Pending names one owner for the revision call.
+- An advisor with no decision (`advised_at` null) shows the Missing-Report line on its own row only when it is the one recovery advisor of its planner. Its planner must still wait on its review. Reason: Consult admits a second advisor once the first is idle, so one advisor owns the `chief_continue` call.
+- While that recovery advisor is idle without a Report, its planner's ready route shows no line. For an epic the route is `chief_consult` again. For a task plan it is wave delegation. Reason: Pending names one next call for the review.
 - A stale advisor shows no line. A stale advisor is one whose planner is no longer `required` (`advisorStale` in `src/plan/planReview.ts`). Reason: `chief_continue` cannot resume a stale advisor.
+
+### Report alert
+
+The report alert is separate from Pending. It uses the same route, without the Pending dedupe.
+
+- A deciding advisor's report alert keeps the revision call, even when Pending omits it. Reason: The alert notifies Chief once.
+- A blocked deciding advisor's report alert keeps the blocker text and the escalation guidance with the call. Reason: The alert is the only notice of the blocker.
+- An approved plan's report alert names the approval and the planner's next action. It shows no next action while the planner is idle without a Report. Reason: The planner's row holds that call in Pending.
 
 ### Alert
 
@@ -191,7 +212,7 @@ A plan advisor has its own rule.
 | Item | Code |
 | --- | --- |
 | Roster Pending block | `src/runtime/roster.ts`: `pendingBlock`, `pendingLines`, `todoLines`, `clipPendingBlock` |
-| Missing-Report line | `src/runtime/lifecycle.ts`: `turnMissingReport`. `src/runtime/nextAction.ts`: `nextAction`. `src/runtime/alerts.ts`: `stillDue` |
+| Missing-Report line | `src/runtime/lifecycle.ts`: `turnMissingReport`. `src/runtime/nextAction.ts`: `nextAction`, `planAdvisorAction`, `revisionOwnsDelivery`. `src/plan/planReview.ts`: `status`, `revisions`, `recoveryAdvisor`, `reportRefusal`. `src/runtime/alerts.ts`: `stillDue` |
 | Decisions after-section | `src/runtime/decisions.ts`: `writeDecisions`. `src/tools/roster.ts` calls it for a todo-only change. |
 | Todo storage | `src/runtime/core.ts`: `chief_todos`, `todosForProject`, `closedTodosForProject` |
 | Chief to another Chief | `src/runtime/chiefs.ts`: `handOver` |
