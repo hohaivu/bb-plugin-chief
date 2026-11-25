@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The checkout freshness domain keeps Chief's checkout current before a researcher or planner reads it. It also records in each researcher and planner report which commit that reader saw. A reader started on a branch gets its own worktree on that branch, and it does not read Chief's checkout. Before that worktree starts, the server points the local branch ref at origin's tip. That sync runs git in the project checkout, but it changes only the ref.
+The checkout freshness domain keeps Chief's checkout current before a researcher or planner reads it. It also records in each researcher and planner report which commit that reader saw. A reader started on a branch gets its own worktree on that branch, and it does not read Chief's checkout. Before that worktree starts, the server runs the task branch sync. The sync fetches the task branch, which refreshes `refs/remotes/origin/<branch>` and writes `FETCH_HEAD`. It then moves the local branch ref to origin's tip when a guard allows it. The sync never changes HEAD, the index, or the working tree of the project checkout.
 
 ## Domain Terms
 
@@ -20,13 +20,15 @@ The checkout freshness domain keeps Chief's checkout current before a researcher
 - **Task branch**: the Git branch of a plan chain. Origin holds its current state.
 - **Local ref**: the branch ref `refs/heads/<branch>` in the project repository. BB cuts a named-branch worktree from it.
 - **Task branch sync**: the step that points a local ref at origin's tip before a worktree starts. See Task branch base.
+- **Old-value guard**: a ref write that git refuses unless the ref still holds the SHA the caller expects.
 
 ## Ownership and Entry Points
 
 | Entry point | File | Role |
 | --- | --- | --- |
-| `fastForward`, `commitStamp`, `stampLine` | `src/forge/checkoutSync.ts` | Run git and build the stamp text. |
-| `freshenChiefCheckout`, `syncChiefCheckout`, `reportStamp`, `serverCheckout`, `stageRead` | `src/runtime/checkout.ts` | Decide whether to fast-forward and read the stamp. `reportStamp` is an adapter of the report intake. |
+| `fastForward`, `commitStamp`, `stampLine`, `pointBranchAtOrigin` | `src/forge/checkoutSync.ts` | Run git and build the stamp text. `pointBranchAtOrigin` runs the task branch sync's git steps. |
+| `freshenChiefCheckout`, `syncChiefCheckout`, `syncTaskBranch`, `reportStamp`, `serverCheckout`, `stageRead` | `src/runtime/checkout.ts` | Decide whether to fast-forward, run the task branch sync, and read the stamp. `reportStamp` is an adapter of the report intake. |
+| `createManagedSpawn` (`launch`) | `src/research/managedSpawn.ts` | Run the task branch sync before a managed launch on a named branch. |
 | `startResearcher` | `src/research/research.ts` | Start a researcher and build the tool reply. |
 | `startPlan`, `startConsult`, `startPlanConsult` | `src/runtime/delegation.ts` | Start a planner or advisor, in the project default or on a branch. |
 | `chief_plan`, CLI `plan` | `src/tools/plan.ts`, `src/runtime/cli.ts` | Build the tool and CLI replies. |
@@ -78,10 +80,10 @@ Chief names a branch with `branch` on `chief_research`, `chief_plan`, or `chief_
 
 | Call | Environment | Freshness call |
 | --- | --- | --- |
-| `chief_research` with `branch` (Chief only) | Managed worktree on `branch` | None |
-| `chief_plan` with `branch`, or a revision with no `branch` of a planner that has a recorded branch | Managed worktree on that branch | None |
-| `chief_consult` with `branch` and no `workerThreadId` | Managed worktree on `branch` | None |
-| Plan consult with no `branch`, of a planner that has a recorded branch | Managed worktree on the planner's branch | None |
+| `chief_research` with `branch` (Chief only) | Managed worktree on `branch` | None (task branch sync only) |
+| `chief_plan` with `branch`, or a revision with no `branch` of a planner that has a recorded branch | Managed worktree on that branch | None (task branch sync only) |
+| `chief_consult` with `branch` and no `workerThreadId` | Managed worktree on `branch` | None (task branch sync only) |
+| Plan consult with no `branch`, of a planner that has a recorded branch | Managed worktree on the planner's branch | None (task branch sync only) |
 
 - The launch names a host, a managed worktree, and the base branch. It never reuses Chief's environment and never uses `project-default`.
 - The launch stores `branch` in the thread row. The busy check and the report stamp read it.
@@ -203,19 +205,26 @@ Each contract carries its reason.
 - `createManagedSpawn` calls `syncTaskBranch` before it spawns a thread in a managed worktree on a named branch. Reason: BB cuts that worktree from the local ref.
 - The sync covers every such launch. That includes workers, Spec Writers, planners, advisors, researchers, and branch reviews.
 - A launch with a `reuse`, `project-default`, or default environment runs no sync and no git command. Reason: those launches do not cut a worktree from a named branch.
-- `syncTaskBranch` skips a project whose checkout is not on the primary host, and it logs one warning line. Reason: the server runs git only on the primary host.
-- `pointBranchAtOrigin` fetches only `refs/heads/<branch>` from origin. Reason: origin holds the current state of the task branch.
-- `pointBranchAtOrigin` creates the local ref when it is missing. Reason: BB needs a local ref to cut the worktree from.
-- `pointBranchAtOrigin` moves the local ref to origin's tip when the local ref is behind it. Reason: the forge writes the local ref once, at an empty `Start:` commit, and no code moves it after that.
-- `pointBranchAtOrigin` also moves the local ref when it has no file change past its merge base with origin. Reason: such commits are empty `Start:` commits and hold no work.
-- `pointBranchAtOrigin` keeps the local ref when it has file changes past its merge base with origin. Reason: the move could leave that work without a branch.
+- `syncTaskBranch` reads the project's default source, or its first source, through SDK lookups. Reason: the sync needs the host and path of the project checkout.
+- `syncTaskBranch` skips a project whose checkout is not on the primary host. Reason: the server runs git only on the primary host.
+- `syncTaskBranch` has one absolute deadline of 30 s, and the deadline starts before its first SDK lookup. Reason: a stalled lookup must not hold the launch past the bound.
+- Each SDK lookup in the sync runs under `min(5 s, time left)`. Reason: one slow lookup must not use the whole budget.
+- `syncTaskBranch` logs one warning line for each lookup error, timeout, missing path, or git skip. Reason: one owner keeps each failure to one line.
+- `pointBranchAtOrigin` fetches only `refs/heads/<branch>` from origin, into `refs/remotes/origin/<branch>`. Reason: origin holds the current state of the task branch.
+- The fetch ignores configured fetch mappings, does not prune, and does not recurse into submodules. Reason: a configured mapping such as `+refs/heads/<branch>:refs/heads/<branch>` would write the local ref without the guards below.
+- Git writes `FETCH_HEAD` on every fetch. Reason: this is a Git behaviour that the sync does not suppress.
+- `pointBranchAtOrigin` creates the local ref with `git branch` when it is missing. Reason: BB needs a local ref to cut the worktree from, and `git branch` refuses to overwrite an existing ref.
+- `pointBranchAtOrigin` moves the local ref to origin's tip when the local ref is an ancestor of origin's tip. Reason: the forge writes the local ref once, at an empty `Start:` commit, and no code moves it after that.
+- `pointBranchAtOrigin` also moves the local ref to origin's tip when the local commits past the merge base have the same tree ID as the merge base. Reason: such commits are empty `Start:` commits and hold no work.
+- `pointBranchAtOrigin` compares tree IDs, not `git diff` output, for the empty-commit check. Reason: config such as `diff.ignoreSubmodules` can hide a changed file or submodule pointer from `git diff`.
+- `pointBranchAtOrigin` keeps the local ref when its tree ID differs from the merge base tree ID. Reason: a move could leave that work without a branch.
 - `pointBranchAtOrigin` keeps the local ref when origin has no such branch. Reason: origin is the source of the task branch.
-- `pointBranchAtOrigin` keeps the local ref when a worktree has the branch checked out. Reason: git refuses to move a checked-out branch.
-- `pointBranchAtOrigin` moves the local ref with `git branch -f`, never with `git update-ref`. Reason: `git branch -f` keeps git's refusal for a checked-out branch.
-- `pointBranchAtOrigin` never changes HEAD, the index, or a file in the project checkout, and it never pushes. Reason: the sync moves a ref only.
-- A second sync with the same origin tip changes no ref. Reason: a repeat call has no effect.
+- `pointBranchAtOrigin` keeps the local ref when a worktree has the branch checked out. Reason: `git update-ref` does not refuse a checked-out branch, so the sync checks the worktree list before the write.
+- `pointBranchAtOrigin` moves the local ref with `git update-ref`, and the old value is the SHA that the sync validated. Reason: the old-value guard makes git refuse the write when another writer moved the ref after the check.
+- A refused write keeps the local ref as the other writer left it. Reason: the sync never overwrites a commit that it did not validate.
+- `pointBranchAtOrigin` never changes HEAD, the index, or a file in the project checkout, and it never pushes. Reason: the sync moves refs only.
+- A second sync with the same origin tip changes no local ref. Reason: a repeat call has no effect.
 - A sync failure never throws and never stops the spawn. Reason: a skip must never stop a spawn, and the worker's `git merge --ff-only` step stays the backstop.
-- `syncTaskBranch` has one absolute deadline of 30 s. Reason: it uses the same bound as a freshness call.
 
 ### Deadlines
 
@@ -245,6 +254,7 @@ Each contract carries its reason.
 - Origin is the source of truth for a task branch. The local ref is plumbing that the server moves before each new worktree.
 - A task branch sync may add up to 30 s to a spawn call on a slow network.
 - A local ref with file changes that origin lacks stays where it is. A new worktree on that branch then starts from that ref.
+- The worktree check and the ref write are two git calls. A worktree that checks out the branch between them is not refused.
 - Planner worktrees in projects whose default is a worktree are not fast-forwarded. Only the stamp covers them.
 - Path comparison is by string, with no realpath step. A symlinked path that differs as a string reads as a separate checkout. The planner call stays silent, as before this change.
 - A concurrent second `chief_research` or `chief_plan` call meets git's own lock. It becomes an ordinary skip warning.
