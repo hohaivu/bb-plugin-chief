@@ -196,6 +196,8 @@ export function createNextAction(ctx: Ctx) {
     if (!planner || planReview.advisors(planner.thread_id).decider?.thread_id !== row.thread_id) return null;
     const { review } = planReview.status(planner);
     if (review.kind === "approved") {
+      // The missing-Report recovery line belongs to the idle planner's own row, not its ready advisor's.
+      if (ctx.turnMissingReport(planner)) return null;
       const next = nextAction(planner, forAlert);
       return next ? `The advisor approves the plan. ${next}` : null;
     }

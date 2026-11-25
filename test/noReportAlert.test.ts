@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
-import { delegate, disposeAll, setup, start } from "./harness";
+import { delegate, disposeAll, planTwoWaves, setup, start, status } from "./harness";
 import { provideSdk } from "./sdk";
 
 provideSdk(sdkTesting);
@@ -60,6 +60,18 @@ describe("finished-without-report alert", () => {
     expect(noreport(state, worker.threadId)).toHaveLength(1);
     await call(state, "chief_report", report, worker.threadId);
     expect(await roster(state, chief.threadId)).not.toContain(line!);
+  });
+
+  test("an approved plan's idle planner shows the recovery line on its own row, not on its ready advisor's", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const { planner } = await planTwoWaves(state, chief.threadId);
+    await call(state, "chief_consult", { planThreadId: planner.threadId, title: "Plan", mission: "Review this plan" }, chief.threadId);
+    const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
+    await call(state, "chief_report", { state: "ready", result: "The plan is sound.", verdict: "approve" }, advisor.threadId);
+    await turn(state, planner.threadId, "I stopped");
+    expect(await rosterLine(state, chief.threadId, planner.threadId)).toContain("without a chief_report");
+    expect(await rosterLine(state, chief.threadId, advisor.threadId)).toBeUndefined();
   });
 
   test.each([
