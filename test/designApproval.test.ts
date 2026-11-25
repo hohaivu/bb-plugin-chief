@@ -1,9 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { PLAN_FIXTURE, disposeAll, setup, start, wave } from "./harness";
-import { createPlanProgress } from "../src/plan/planProgress";
-import { createWaveSchedule } from "../src/plan/waveSchedule";
-import { delegateWave, followRoute, plan, readyIdle, rowOf, setLive, tool, workerOn } from "./flowHelpers";
+import { delegateWave, followRoute, plan, planWaves, readyIdle, rowOf, setLive, tool, workerOn } from "./flowHelpers";
 import { provideSdk } from "./sdk";
 
 provideSdk(sdkTesting);
@@ -11,7 +9,7 @@ vi.mock("node:child_process", async () => (await import("./execMock")).childProc
 afterEach(disposeAll);
 
 // Contract (src/plan/planProgress.ts readyStep): chief_owner_approval's recorded approval, scoped to the designer's latest report,
-// moves a design wave's route from "ask the owner" to "delegate the successor" (or "complete" on a chain tip). Pending and the approval reply share that one route.
+// moves a design wave's route from "ask the owner" to "delegate the successor" (or "complete" on a chain tip); unapproved, Pending shows no successor call. Pending and the approval reply share that one route.
 // Assertions read call shapes (tool name and parameters), never prose.
 
 async function approvedDesigner(waves: object[]) {
@@ -46,38 +44,46 @@ describe("an approved design wave", () => {
     expect(workerOn(state, planner.threadId, 2).thread_id).toBe(followed.thread);
   });
 
-  test("a new designer report clears the approval: Pending asks for it again and the successor is not delegated", async () => {
+  test("the successor call is hidden while the wave is unapproved: before approval and after a new designer report", async () => {
     const { state, planner, designer, pending, approve } = await approvedDesigner([{ body: PLAN_FIXTURE, design: true }, { body: wave(2), dependsOn: [1] }]);
+    const successor = `chief_delegate (planThreadId: ${planner.threadId}, wave: 2`;
+    const unapproved = await pending();
+    expect(unapproved).toContain(askForApproval(designer));
+    expect(unapproved).not.toContain(successor);
+
     await approve();
     expect(rowOf(state, designer).owner_approval).toBe("ok");
+    expect(await pending()).toContain(successor);
 
     setLive(state, designer, "active");
     await readyIdle(state, designer);
     expect(rowOf(state, designer).owner_approval).toBeNull();
-    expect(await pending()).toContain(askForApproval(designer));
+    const cleared = await pending();
+    expect(cleared).toContain(askForApproval(designer));
+    expect(cleared).not.toContain(successor);
     expect(workerOn(state, planner.threadId, 2)).toBeUndefined();
   });
 });
 
-// A design wave that is a chain tip cannot be reported through chief_report (plan validation refuses it), so the tip route is checked at the progress seam.
-describe("readyStep on a design chain tip", () => {
-  const waves = [{ path: "w1.md", design: true }, { path: "w2.md", dependsOn: [] }];
-  const designer = (owner_approval: string | null) => ({
-    thread_id: "d", role: "worker", kind: "designer", state: "ready", last_report_state: "ready", created_at: 1,
-    plan_thread_id: "p", plan_wave: 2, plan_waves: null, replaces_thread_id: null, report_seq: 1, branch: null, verdict: null,
-    worker_thread_id: null, regression: null, findings: null, blocker: null, owner_approval,
-  });
-  const stepOf = (owner_approval: string | null) => {
-    const rows = new Map<string, any>([
-      ["p", { ...designer(null), thread_id: "p", role: "planner", kind: null, plan_thread_id: null, plan_wave: null, plan_waves: JSON.stringify(waves) }],
-      ["d", { ...designer(owner_approval), plan_wave: 1 }],
-    ]);
-    const progress = createPlanProgress<any>(() => rows, createWaveSchedule<any>(() => rows), {} as any, { terminal: (s) => s === "complete", busy: () => false });
-    return progress.readyStep(rows.get("d"));
-  };
+// Plan intake refuses a design-only chain tip, so a tip is seeded the way a legacy persisted plan holds one: wave 2 re-headed onto its own chain.
+describe("an approved design chain tip", () => {
+  test("the approval reply and Pending name the same chief_complete call, and it completes the designer", async () => {
+    const { state, chief, planner, designer, pending, approve } = await approvedDesigner([{ body: PLAN_FIXTURE, design: true }, { body: wave(2), dependsOn: [1] }]);
+    const waves = JSON.parse(planWaves(state, planner.threadId));
+    waves[1].dependsOn = [];
+    state.db.prepare(`UPDATE managed_threads SET plan_waves=? WHERE thread_id=?`).run(JSON.stringify(waves), planner.threadId);
+    const complete = `chief_complete (threadId: ${designer})`;
+    expect(await pending()).toContain(askForApproval(designer));
 
-  test("approved: designApproved with no successor; unapproved: designDone", () => {
-    expect(stepOf("ok")).toMatchObject({ kind: "designApproved", next: null });
-    expect(stepOf(null)).toMatchObject({ kind: "designDone" });
+    const reply = await approve();
+    const after = await pending();
+    expect(after).not.toContain(askForApproval(designer));
+    expect(reply).not.toContain(askForApproval(designer));
+    expect(reply).toContain(complete);
+    expect(after).toContain(complete);
+
+    await tool(state, "chief_complete", { threadId: designer }, chief.threadId);
+    expect(rowOf(state, designer).state).toBe("complete");
   });
 });
+
