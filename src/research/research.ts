@@ -140,15 +140,17 @@ export function createResearch(deps: ResearchDeps) {
     return row;
   }
 
-  /** Why the run cannot start (the provider is not installed or at 100% of a usage window), or null. A signed-out status only warns: account-pool proxied hosts report it while pooled threads work. */
+  /** Why the run cannot start (the provider is not installed), or null. A signed-out status or a full usage window only warns: account-pool proxied hosts report it while pooled threads work. */
   async function researchPreflight(hostId: string, providerId: string) {
     // ponytail: fails open (missing key, error, throw, timeout) because not every provider reports usage.
     const res = await discover(async (signal) => bb.sdk.system.usageLimits({ hostId, providerId, signal }), "Usage check").catch(() => null);
     const usage = (res as Record<string, any> | null)?.[providerId];
     if (usage?.status === "not_installed") return `${providerId} is ${usage.status}`;
     if (usage?.status === "unauthenticated" || usage?.status === "expired") bb.log.warn(`Researcher provider ${providerId} reports ${usage.status}; starting anyway (a pooled or proxied host can still serve it).`);
+    // A full window describes one account: the owner may have switched the default account since, so it only warns.
     const full = usage?.status === "ok" ? usage.windows?.find((w: { usedPercent: number }) => w.usedPercent >= 100) : null;
-    return full ? `${providerId} is out of quota (${full.label} window at ${full.usedPercent}%${full.resetsAt ? `, resets ${full.resetsAt}` : ""})` : null;
+    if (full) bb.log.warn(`Researcher provider ${providerId} reports its ${full.label} window at ${full.usedPercent}%${full.resetsAt ? `, resets ${full.resetsAt}` : ""}; starting anyway (the account may have changed).`);
+    return null;
   }
 
   /** The project's default provider, or undefined when BB reports none. */
@@ -202,7 +204,7 @@ export function createResearch(deps: ResearchDeps) {
     const helperPermissionMode = helperExecution.providerId === providerId ? permissionMode : await offersMode(helperExecution.providerId);
     // A helper pick on another provider needs its own check.
     const blocked = hostId ? (providerId && await researchPreflight(hostId, providerId)) || (helperExecution.providerId && helperExecution.providerId !== providerId && await researchPreflight(hostId, helperExecution.providerId)) || null : null;
-    if (blocked) throw new Error(`chief_research did not start: ${blocked}. Pick another researcher or research helper model in Chief settings or retry after the reset.`);
+    if (blocked) throw new Error(`chief_research did not start: ${blocked}. Pick another researcher or research helper model in Chief settings.`);
     const { branch } = params;
     // The researcher reads Chief's working tree, so it must reuse Chief's environment: no fresh worktree fallback.
     // With a branch it reads its own worktree on that branch instead.

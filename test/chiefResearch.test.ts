@@ -224,16 +224,17 @@ describe("chief_research", () => {
   });
 
   describe("provider pre-flight", () => {
-    test("refuses a provider that is not installed or out of quota before any spawn, warns but starts when signed out, and fails open otherwise", async () => {
+    test("refuses a provider that is not installed before any spawn, warns but starts when signed out or out of quota, and fails open otherwise", async () => {
       let usage: (args: any) => unknown = () => ({});
       const state = await setup({ usageLimits: (args) => usage(args) });
       await setResearcherPick(state);
       const chief = await roleThread(state, "chief");
-      usage = () => ({ codex: { status: "ok", windows: [{ label: "5h", usedPercent: 100, resetsAt: "2026-10-08T12:00:00Z" }] } });
-      await expect(call(state, chief, ask())).rejects.toThrow(/out of quota \(5h window at 100%, resets 2026-10-08T12:00:00Z\).*Pick another researcher/);
       usage = () => ({ codex: { status: "not_installed" } });
       await expect(call(state, chief, ask())).rejects.toThrow(/not_installed/);
       expect(researcherSpawn(state)).toBeUndefined();
+      usage = () => ({ codex: { status: "ok", windows: [{ label: "5h", usedPercent: 100, resetsAt: "2026-10-08T12:00:00Z" }] } });
+      await call(state, chief, ask());
+      expect(state.harness.logEntries.some((entry) => entry.level === "warn" && entry.message.includes("5h") && entry.message.includes("2026-10-08T12:00:00Z"))).toBe(true);
       for (const status of ["unauthenticated", "expired"]) {
         usage = () => ({ codex: { status } });
         await call(state, chief, ask());
@@ -243,8 +244,18 @@ describe("chief_research", () => {
       await call(state, chief, ask());
       usage = () => { throw new Error("rpc down"); };
       await call(state, chief, ask());
-      expect(state.spawned.filter((args) => args.pluginMetadata?.role === "researcher")).toHaveLength(4);
-      expect(callRows(state).map((row) => row.outcome)).toEqual(["error", "error", "spawned", "spawned", "spawned", "spawned"]);
+      expect(state.spawned.filter((args) => args.pluginMetadata?.role === "researcher")).toHaveLength(5);
+      expect(callRows(state).map((row) => row.outcome)).toEqual(["error", "spawned", "spawned", "spawned", "spawned", "spawned"]);
+    });
+
+    test("a full window with a null resetsAt still starts and warns without a reset time", async () => {
+      const state = await setup({ usageLimits: () => ({ codex: { status: "ok", windows: [{ label: "5h", usedPercent: 100, resetsAt: null }] } }) });
+      await setResearcherPick(state);
+      await call(state, await roleThread(state, "chief"), ask());
+      expect(researcherSpawn(state)).toBeDefined();
+      const warning = state.harness.logEntries.find((entry) => entry.level === "warn" && entry.message.includes("5h") && entry.message.includes("100%"));
+      expect(warning).toBeDefined();
+      expect(warning?.message).not.toContain("null");
     });
 
     test.each([
