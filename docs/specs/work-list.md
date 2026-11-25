@@ -89,7 +89,7 @@ The work list is the one place where a Chief reads what is pending: the Pending 
 | Contract | Reason |
 | --- | --- |
 | The Pending block, the `todo #N` lines and the `after:` collapse line of `chief_roster` equal base for the same state. With `includeOthers: true`, the "Other Chiefs' todos" section equals base too. | The roster is now the only work list. |
-| The text and JSON of `bb chief status` equal base for the same state. | The CLI reads the same state. |
+| The JSON of `bb chief status` equals base for the same state. The text of `bb chief status` equals base for the same state, except the Missing-Report line. | The CLI reads the same state. The text output prints the Pending block (`pendingLines`). The JSON output does not. |
 | `handOver` moves `chief_todos` and undelivered alerts as at base. | A successor must keep the open work. |
 | A Coordinator's roster renders a Children block. Each child entry holds that child's own Pending block. See `coordinator.md`. | A Coordinator owns no managed thread. It reads the work of its children. |
 | The Pending block of a plain Chief equals base for the same state. | The Coordinator change must not alter a plain Chief's work list. |
@@ -123,7 +123,7 @@ A Chief's decisions file lists its own open todos that wait on an `after:` condi
 
 ## Missing-Report line
 
-A managed thread can end its turn while idle, without a `chief_report`. The Missing-Report line tells Chief that this happened. It appears in the Pending block of `chief_roster`, so Chief reads it on each roster read until the condition ends. This line is the one change to the Pending block. The contracts above that compare the Pending block with base exclude it.
+A managed thread can end its turn while idle, without a `chief_report`. The Missing-Report line tells Chief that this happened. It appears in the Pending block of `chief_roster`, so Chief reads it on each roster read until the condition ends. This line is the one change to the Pending block. The contracts above that compare the Pending block with base exclude it. The text output of `bb chief status` prints it too, because it prints the same Pending block. Its JSON output does not.
 
 ### One answer: `turnMissingReport`
 
@@ -142,6 +142,7 @@ A `chief_report` writes a `report:<active_cycle>:` key for a row with a Chief. T
 - The line tells Chief to inspect the thread, then continue it to ask for its `chief_report`, or decide itself.
 - The line stays on each read until the row reports or starts a new turn. Reason: The alert notifies Chief once. The Pending block must show open work until the cause ends.
 - A row with an earlier role-specific line shows that line, not the Missing-Report line. Reason: A role-specific line holds the recovery step for its own role.
+- A ready plan advisor shows no Missing-Report line when its planner has an approved plan and is idle without a Report. The planner's own row shows the line. Reason: The advisor's line shows the approval. The recovery step belongs to the planner's row.
 - A row that reported shows no Missing-Report line. This covers `ready`, `blocked`, `complete` and an `active` report in the same cycle. Reason: An idle row that reported is not stuck.
 
 ### Alert
