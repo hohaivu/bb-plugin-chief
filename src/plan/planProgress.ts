@@ -36,7 +36,7 @@ export type GateDecision<Row> =
   | { kind: "restart"; sides: "reviewer"[]; blocked: Row[] }
   | { kind: "wait"; who: Row[] }
   | { kind: "fix"; codeFindings: number }
-  | { kind: "docsRepair"; writer: Row }
+  | { kind: "docsRepair"; replaces: Row }
   | { kind: "escalate"; why: string }
   | { kind: "pass" };
 
@@ -92,8 +92,9 @@ export function gateDecision<Row extends ProgressRow>(input: {
   if (docsSettled) return { kind: "pass" };
   if (docsWait) return { kind: "wait", who: [repair!] };
   if (multiDocs) return multiEscalate;
-  const writer = gateWriters[0];
-  return writer ? { kind: "docsRepair", writer } : { kind: "escalate", why: `the review found docs findings and no side-lane Spec Writer of this gate can repair them` };
+  // A planned gate's repair needs a side-lane writer. An unplanned gate has none: the Spec Writer replaces its ready fix run, else its first target.
+  const replaces = gateWriters[0] ?? (gate.plan_thread_id ? undefined : fixer && done(fixer) ? fixer : row(gate.targets[0]!.threadId));
+  return replaces ? { kind: "docsRepair", replaces } : { kind: "escalate", why: `the review found docs findings and no side-lane Spec Writer of this gate can repair them` };
 }
 
 /** The two row-state tests the server owns: a terminal row, and a live thread status that is busy. */

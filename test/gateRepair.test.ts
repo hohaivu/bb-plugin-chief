@@ -46,7 +46,7 @@ test("a ready fix permits one advisory re-review even if it also requests change
   await world.open(worker.threadId);
   expect(world.gate().reviewer_thread_id).toBe(second);
   await world.verdict(second, "request_changes");
-  await world.open(worker.threadId);
+  await world.call("chief_review", { workerThreadId: worker.threadId }); // the finished advisory reviewer starts nothing
   expect(world.gate().reviewer_thread_id).toBe(second);
   await world.complete(worker.threadId);
   expect(world.row(worker.threadId).state).toBe("complete");
