@@ -9,7 +9,7 @@ import type { createReviewLedger } from "./reviewLedger";
 import { REVIEW_ONLY } from "../core/roles";
 import { clip, clipMiddle, recordedLines, type RecordedCommand } from "../core/text";
 import { terminal } from "../types";
-import type { GateTarget, ReviewGate, ThreadStore } from "../db/threadStore";
+import { repairTarget, type GateTarget, type ReviewGate, type ThreadStore } from "../db/threadStore";
 import { chainOf, isReady, isWriter, type PlanWave } from "../plan/waveSchedule";
 
 type Database = ReturnType<BbPluginApi["storage"]["database"]>;
@@ -636,11 +636,11 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
     if (!contained) throw new Error(`Worker ${target.thread_id}'s HEAD is not in the pinned commit ${pinnedSha.slice(0, 12)} on origin: ${recovery}.`);
   }
 
-  /** Starts the gate's reviewer in a fresh worktree on the first target's branch, over the pinned heads. Returns its id and title. */
+  /** Starts the gate's reviewer in a fresh worktree on the repair target's branch, over the pinned heads. Returns its id and title. */
   async function launchReviewer(gate: ReviewGate, worker: Row, focus: string | undefined, acceptedGaps: string | undefined, projectDir: string | null, previous: ReviewBriefInput["previous"] = null) {
     const targets = gate.targets.map((target) => store.get(target.threadId)!);
     const covered: CoveredTarget<Row>[] = gate.targets.map((target) => ({ row: store.get(target.threadId)!, head: { branch: target.branch, sha: target.headSha, base: target.base } }));
-    const mine = covered.find((target) => target.row.thread_id === worker.thread_id) ?? covered[0]!;
+    const mine = covered.find((target) => target.row.thread_id === worker.thread_id) ?? covered.find((target) => target.row.thread_id === repairTarget(gate).threadId)!;
     const workerThreadId = mine.row.thread_id;
     const planReview = targets.length > 1 || (!!worker.plan_thread_id && worker.plan_wave != null && plan.planWavesFor(worker.plan_thread_id).length > 0);
     // Sequential, each bounded by its own deadline.
@@ -770,7 +770,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       }
       const thread = await managedSpawn.launch(prepared, {
         projectId: worker.project_id,
-        environment: worktreeEnvironment(hostId, gate.targets[0]!.branch),
+        environment: worktreeEnvironment(hostId, repairTarget(gate).branch),
         title, prompt: engine.mode === "reviewer" || (!engineDir && engineTargets.some(isPinned)) ? prompt : [prompt, ...prAgentSection(engine.mode, engineTargets, engineDir ?? "", helperWritten)].join("\n"),
       }, { role: "reviewer", chiefThreadId: worker.chief_thread_id, workerThreadId, reviewedReportSeq: mine.row.report_seq, reviewedHeadSha: mine.head!.sha },
       (threadId) => {

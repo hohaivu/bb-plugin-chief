@@ -5,7 +5,7 @@ import { neverReported } from "../plan/planProgress";
 import { worktreeEnvironment } from "../research/managedSpawn";
 import { heavySlotCount } from "../research/heavySlots";
 import { isReady, isSettled } from "../plan/waveSchedule";
-import type { ReviewGate } from "../db/threadStore";
+import { repairTarget, type ReviewGate } from "../db/threadStore";
 import { CONTINUE_REMINDERS, planAdmissions, planOnly } from "../core/roles";
 import { type FailEntry, type ManagedRow, type ReportFinding, terminal } from "../types";
 import { clip } from "../core/text";
@@ -231,12 +231,12 @@ export function createDelegation(ctx: Ctx) {
 
   type FixAdmission = { run: "gate"; gate: ReviewGate } | { run: "chat"; gate?: undefined };
 
-  /** A replaces: that is a fix run: the gate's one fix run (replaces the gate's first target), or a chat fix
+  /** A replaces: that is a fix run: the gate's one fix run (replaces the gate's repair target), or a chat fix
    * (replaces a completed gate target or fix run while its environment lives). Throws on a refused one; null for any other delegation. */
   function fixAdmission(prior: ManagedRow, kind: string | undefined): FixAdmission | null {
     const gate = store.gateFor(prior.thread_id);
     const escalate = (fixer: string) => `The gate already had its fix run (${fixer}): escalate to the user.`;
-    if (gate && gate.targets[0].threadId === prior.thread_id && kind !== "spec-writer") {
+    if (gate && repairTarget(gate).threadId === prior.thread_id && kind !== "spec-writer") {
       const fixer = gate.fixer_thread_id ? store.get(gate.fixer_thread_id) : undefined;
       if (fixer && neverReported(fixer)) throw new Error(`Fix run ${fixer.thread_id} stopped before it reported and its environment holds its partial work: chief_delegate (replaces: ${fixer.thread_id}, kind: worker).`);
       if (gate.fixer_thread_id && prior.state !== "complete") throw new Error(escalate(gate.fixer_thread_id));
@@ -299,7 +299,7 @@ export function createDelegation(ctx: Ctx) {
     const gate = prior ? store.gateFor(prior.thread_id) : params.planThreadId ? store.gate(`plan:${params.planThreadId}`) : undefined;
     if (!fix && gate?.targets.some((target) => store.get(target.threadId)?.state !== "complete")) {
       if (prior && gate.targets.some((target) => target.threadId === prior.thread_id) && params.kind !== "spec-writer") {
-        throw new Error(`The review gate pinned ${prior.thread_id}; fixes go through the gate's fix run on its first target ${gate.targets[0]!.threadId}. ${ctx.gateLine(gate, ctx.gateOf(prior)!.decision)}`);
+        throw new Error(`The review gate pinned ${prior.thread_id}; fixes go through the gate's fix run on its first target ${repairTarget(gate).threadId}. ${ctx.gateLine(gate, ctx.gateOf(prior)!.decision)}`);
       }
       // One writable owner per gate: a docs repair waits for the fix run.
       const busyFixer = isWriter(params.kind) && gate.fixer_thread_id ? store.get(gate.fixer_thread_id) : undefined;

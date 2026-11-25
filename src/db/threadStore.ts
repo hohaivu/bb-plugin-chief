@@ -75,6 +75,9 @@ export interface ReviewGate {
   gate_key: string; project_id: string; chief_thread_id: string; plan_thread_id: string | null; targets: GateTarget[];
   reviewer_thread_id: string | null; tester_thread_id: string | null; fixer_thread_id: string | null; corrector_thread_id: string | null; created_at: number;
 }
+/** The target that owns the gate's one fix run: the reviewer checks out its branch, gate advice names it, and fix admission accepts only it.
+ * reviewTargetsFor stores it first (the integrate worker of a horizontal plan, else the earliest wave). */
+export function repairTarget(gate: Pick<ReviewGate, "targets">): GateTarget { return gate.targets[0]!; }
 // tester_thread_id and corrector_thread_id are legacy: nothing writes them; read only for old gates.
 export type GateActor = "reviewer_thread_id" | "tester_thread_id" | "fixer_thread_id" | "corrector_thread_id";
 const GATE_ACTORS: GateActor[] = ["reviewer_thread_id", "tester_thread_id", "fixer_thread_id", "corrector_thread_id"];

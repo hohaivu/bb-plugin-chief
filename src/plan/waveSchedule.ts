@@ -287,7 +287,7 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     if (!waves.length || worker.plan_wave == null) return [worker];
     const keep = (latest: Row | undefined) => latest && !isDesignWave(latest) && (latest.thread_id === worker.thread_id || latest.state !== "complete") ? [latest] : [];
     const implementation = waves.flatMap((_, index) => keep(latestWorker(worker.plan_thread_id!, index + 1)));
-    // The gate's fix run belongs to its first target. Only the horizontal shape leads with the integrate worker (its head carries its parent block's
+    // The first row becomes the pinned gate's repair target (repairTarget). Only the horizontal shape leads with the integrate worker (its head carries its parent block's
     // code): two or more heads stacked on one wave and exactly one wave continuing a stacked block. Any other plan keeps wave order.
     const stackedOn = heads(waves).flatMap((head) => waves[head - 1]?.stackOn ?? []);
     const continuations = waves.flatMap((_, index) => {

@@ -249,3 +249,18 @@ test("replacing a gate's second target names the gate's first target", async () 
   const message = await refused(world, { replaces: second.threadId, kind: "worker" });
   expect(message).toContain(worker.threadId);
 });
+
+// Contract: fix admission follows the gate's repair target (repairTarget), not the worker that opened the review: the fix run replaces the
+// repair target, and the other pinned target is refused with the refusal naming the repair target's id.
+test("fix admission follows the repair target, not the worker that opened the review", async () => {
+  const world = await gateWorld();
+  const { worker } = await inFix(world);
+  const lead = await world.worker("Repair target");
+  const gate = world.gate();
+  const targets = JSON.parse(gate.targets);
+  world.state.db.prepare("UPDATE review_gates SET targets=? WHERE gate_key=?").run(JSON.stringify([{ ...targets[0], threadId: lead.threadId }, ...targets]), gate.gate_key);
+  await world.ready(lead.threadId);
+  expect(await refused(world, { replaces: worker.threadId, kind: "worker" })).toContain(lead.threadId);
+  const fix = await world.delegateTo({ replaces: lead.threadId, kind: "worker" });
+  expect(world.row(fix.threadId)).toMatchObject({ replaces_thread_id: lead.threadId, fix_run: "gate" });
+});
