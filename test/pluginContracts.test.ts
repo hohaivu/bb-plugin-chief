@@ -146,7 +146,7 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
     expect((await chiefReview(state, chief.threadId, { pullRequest: "https://github.com/acme/widgets/pull/7" })).title).toBe("Review · feature/from-github");
-    expect(execFileMock).not.toHaveBeenCalledWith("git", expect.anything(), expect.anything());
+    expect(execFileMock).not.toHaveBeenCalledWith("git", expect.arrayContaining(["remote"]), expect.anything());
   });
 
   test("resolves a bare PR number's forge from the target project's own checkout, not the plugin process's cwd", async () => {

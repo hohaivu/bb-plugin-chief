@@ -196,7 +196,7 @@ export function createChiefs(ctx: Ctx) {
     }
   }
 
-  const managedSpawn = createManagedSpawn({ bb, db, spawnExecution: ctx.spawnExecution, ensureSection: ctx.ensureSection, readRules: ctx.readRules, lifecycleOwner: ctx.lifecycleOwner, insertThread: store.insert, persistBrief: (...a) => ctx.persistBrief(...a) });
+  const managedSpawn = createManagedSpawn({ bb, db, spawnExecution: ctx.spawnExecution, ensureSection: ctx.ensureSection, readRules: ctx.readRules, lifecycleOwner: ctx.lifecycleOwner, insertThread: store.insert, persistBrief: (...a) => ctx.persistBrief(...a), syncBranch: (...a) => ctx.syncTaskBranch(...a) });
   return { adoptPendingHandovers, createChief, ensureChief, replaceChief, handOver, handoffSection, managedSpawn, unpinPendingTab };
 }
 

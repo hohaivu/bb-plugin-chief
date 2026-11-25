@@ -60,8 +60,9 @@ export function createManagedSpawn<Input extends InsertBase>(deps: {
   lifecycleOwner: (chiefThreadId: string | null) => Promise<{ lifecycleOwnerThreadId?: string }>;
   insertThread: (input: Input) => void;
   persistBrief: (threadId: string, projectId: string, prompt: string) => Promise<void>;
+  syncBranch: (projectId: string, branch: string) => Promise<void>;
 }): ManagedSpawn<Input> {
-  const { bb, db, spawnExecution, ensureSection, readRules, lifecycleOwner, insertThread, persistBrief } = deps;
+  const { bb, db, spawnExecution, ensureSection, readRules, lifecycleOwner, insertThread, persistBrief, syncBranch } = deps;
 
   async function prepare(projectId: string, pick: { role: ModelRole; hostId: string | null }) {
     const execution = await spawnExecution(pick.role, pick.hostId, projectId);
@@ -79,6 +80,10 @@ export function createManagedSpawn<Input extends InsertBase>(deps: {
     inTransaction?: (threadId: string) => void,
   ) {
     const chiefThreadId = row.chiefThreadId ?? null;
+    // BB cuts a named-branch worktree from the local ref, which only Chief moves.
+    if (environment?.type === "host" && environment.workspace?.type === "managed-worktree" && environment.workspace.baseBranch.kind === "named") {
+      await syncBranch(projectId, environment.workspace.baseBranch.name);
+    }
     const spawnThread = async () => bb.sdk.threads.spawn({
       projectId,
       environment,
