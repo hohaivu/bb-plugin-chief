@@ -29,6 +29,17 @@ describe("managedSpawn launch branch sync", () => {
     expect(order).toEqual(["sync:proj:feat", "spawn"]);
   });
 
+  test("waits for the sync to finish before it spawns", async () => {
+    let release = () => {};
+    const { order, run } = setup(() => new Promise<void>((resolve) => { release = resolve; }));
+    const launched = run(worktreeEnvironment("h", "feat"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(order).toEqual(["sync:proj:feat"]);
+    release();
+    await launched;
+    expect(order).toEqual(["sync:proj:feat", "spawn"]);
+  });
+
   test.each([
     ["default base", worktreeEnvironment("h")],
     ["reuse", { type: "reuse", threadId: "thr_old" }],

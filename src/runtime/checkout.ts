@@ -110,18 +110,26 @@ export function createCheckout(ctx: Ctx) {
     }
   }
 
-  /** Moves the project checkout's local `<branch>` to origin's tip before BB cuts a worktree from it. Never throws. */
+  /** Moves the project checkout's local `<branch>` to origin's tip before BB cuts a worktree from it. Never throws.
+   * One 30 s deadline covers the SDK lookups and git; every skip, timeout and error ends in the one warning below. */
   async function syncTaskBranch(projectId: string, branch: string): Promise<void> {
+    const deadline = Date.now() + 30_000;
+    const read = stageRead(deadline);
+    let skip: string | null = null;
     try {
-      const skip = await checkoutHostSkip(projectId);
-      if (skip) return bb.log.warn(`Task branch ${branch} not moved to origin before a worktree spawn: ${skip}`);
-      const cwd = await ctx.projectPath(projectId);
-      if (!cwd) return bb.log.warn(`Task branch ${branch} not moved to origin before a worktree spawn: no checkout path`);
-      const result = await pointBranchAtOrigin({ cwd, env: forgeEnv(), branch, deadline: Date.now() + 30_000 });
-      if ("skipped" in result) bb.log.warn(`Task branch ${branch} not moved to origin before a worktree spawn: ${result.skipped}`);
+      const project = await read(() => bb.sdk.projects.get({ projectId }));
+      const source = project.sources?.find((candidate) => candidate.isDefault) ?? project.sources?.[0];
+      if (!source?.hostId) skip = "no source host recorded";
+      else if (source.hostId !== (await read(() => bb.sdk.system.config())).primaryHostId) skip = "the project checkout is on a remote host, not the plugin server";
+      else if (!source.path) skip = "no checkout path";
+      else {
+        const result = await pointBranchAtOrigin({ cwd: source.path, env: forgeEnv(), branch, deadline });
+        if ("skipped" in result) skip = result.skipped;
+      }
     } catch (error) {
-      bb.log.warn(`Task branch ${branch} not moved to origin before a worktree spawn: ${clip(String(error), 200)}`);
+      skip = clip(String((error as Error)?.message ?? error), 200);
     }
+    if (skip) bb.log.warn(`Task branch ${branch} not moved to origin before a worktree spawn: ${skip}`);
   }
   return { checkoutHostSkip, freshenChiefCheckout, reportStamp, syncChiefCheckout, syncTaskBranch };
 }

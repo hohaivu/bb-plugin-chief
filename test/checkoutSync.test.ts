@@ -188,9 +188,9 @@ describe("pointBranchAtOrigin", () => {
     sh(r.other, "commit", "-q", "-m", "tip");
     sh(r.other, "push", "-q", "origin", "HEAD:feat");
     const tip = sh(r.other, "rev-parse", "HEAD");
-    const call = async () => {
+    const call = async (branch = "feat", env: NodeJS.ProcessEnv = ENV) => {
       const before = { head: r.head(), status: sh(r.chief, "status", "--porcelain") };
-      const result = await pointBranchAtOrigin(r.opts({ branch: "feat" } as never));
+      const result = await pointBranchAtOrigin({ ...r.opts({ branch } as never), env });
       expect({ head: r.head(), status: sh(r.chief, "status", "--porcelain") }).toEqual(before);
       return result;
     };
@@ -254,8 +254,40 @@ describe("pointBranchAtOrigin", () => {
   test("leaves the local ref and skips when origin has no such branch", async () => {
     const w = world();
     sh(w.chief, "branch", "nope", w.c0);
-    const result = await pointBranchAtOrigin(w.opts({ branch: "nope" } as never));
-    expect(result).toHaveProperty("skipped");
+    expect(await w.call("nope")).toHaveProperty("skipped");
     expect(w.local("nope")).toBe(w.c0);
+  });
+
+  test("a configured fetch mapping onto the local head never overwrites an unpushed branch", async () => {
+    const w = world();
+    w.localCommit("mine.txt");
+    const mine = w.local();
+    sh(w.chief, "config", "--add", "remote.origin.fetch", "+refs/heads/feat:refs/heads/feat");
+    expect(await w.call()).toHaveProperty("skipped");
+    expect(w.local()).toBe(mine);
+  });
+
+  test("a local commit whose only change is a submodule pointer is not discarded, even with diff.ignoreSubmodules=all", async () => {
+    const w = world();
+    sh(w.chief, "config", "diff.ignoreSubmodules", "all");
+    sh(w.chief, "checkout", "-q", "-b", "feat", w.c0);
+    sh(w.chief, "update-index", "--add", "--cacheinfo", `160000,${w.c0},sub`);
+    sh(w.chief, "commit", "-q", "-m", "bump sub");
+    sh(w.chief, "checkout", "-q", "main");
+    const mine = w.local();
+    expect(await w.call()).toHaveProperty("skipped");
+    expect(w.local()).toBe(mine);
+  });
+
+  test("a local ref that moves between validation and the write is left as the other writer set it", async () => {
+    const w = world();
+    sh(w.chief, "branch", "feat", w.c0);
+    // A git wrapper on PATH: when the code checks worktrees (just before its write), another writer first adds an unpushed commit to local feat.
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    const unpushed = sh(w.chief, "commit-tree", "-p", w.c0, "-m", "unpushed", `${w.c0}^{tree}`);
+    const bin = mkdtempSync(join(w.root, "bin-"));
+    writeFileSync(join(bin, "git"), `#!/bin/sh\n[ "$1" = worktree ] && ${realGit} update-ref refs/heads/feat ${unpushed}\nexec ${realGit} "$@"\n`, { mode: 0o755 });
+    expect(await w.call("feat", { ...ENV, PATH: `${bin}:${ENV.PATH}` })).toHaveProperty("skipped");
+    expect(w.local()).toBe(unpushed);
   });
 });
