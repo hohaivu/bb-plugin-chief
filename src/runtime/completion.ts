@@ -15,8 +15,8 @@ export function createCompletion(ctx: Ctx) {
     if (isDesignWave(row)) {
       return row.owner_approval ? null : `${row.thread_id} is design-only work, which only the owner approves: show the user its artboards and record their decision with chief_owner_approval (workerThreadId: ${row.thread_id}), or pass override with a reason to complete anyway.`;
     }
-    // A chat fix run has no gate and no review: its own ready report and a clean docs/ history complete it.
-    if (row.fix_run === "chat") {
+    // A chat fix run has no gate and no review unless chief_review opened or joined one for it: its own ready report and a clean docs/ history complete it.
+    if (row.fix_run === "chat" && !ctx.gateOf(row)) {
       if (row.last_report_state !== "ready") return `chat fix run ${row.thread_id} has no ready report yet: wait for it, or pass override with a reason.`;
       let docs: string | null = null;
       await docsGate(row, (why) => { docs = why; throw new Error(why); }).catch(() => undefined);

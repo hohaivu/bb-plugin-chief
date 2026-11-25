@@ -11,6 +11,9 @@ The review engine decides how a Chief-managed worker reviewer forms its verdict 
 - **Target line**: one line of a plan review subject. It covers one pull request (pinned targets) or one branch (unpinned targets), and names every worker of that group.
 - **Review gate**: the one review of a plan (or of an unplanned task). It holds one reviewer, and its targets stay pinned. Its fix run joins it when needed. See Review Gate.
 - **Fix run**: the one fresh worker that a gate admits after a `fix` decision. It replaces the first target of the gate and fixes the findings. It is the last repair of the gate.
+- **Chain gate**: the newest gate that a row on a worker's `replaces:` chain belongs to, planned or unplanned. It is open while some target is not complete, and closed when every target is complete.
+- **Completed worker**: an unplanned worker that belongs to a closed gate. It gets no second review. See Chain gate.
+- **Docs repair**: a Spec Writer that replaces a row to fix the docs findings of a gate. See Docs Repair.
 - **Gate decision**: the state that `gateDecision` returns for a gate: start, restart, wait, fix, docsRepair, escalate or pass.
 - **Accepted gap**: a verification gap that Chief accepted before the review and passed in `acceptedGaps`.
 - **Outcome**: the one result an engine gives for a target: definitive, needs_review, failure, or not pinned.
@@ -34,6 +37,9 @@ The review engine decides how a Chief-managed worker reviewer forms its verdict 
 | `reviewParams` | `src/tools/review.ts` | Defines the `chief_review` inputs, `focus` and `acceptedGaps` included. |
 | `startReview` | `src/review/reviewStart.ts` | Opens or joins the review gate, pins its targets, re-pins them on each later launch, and launches the missing side or the re-review. Reads the engine once at review start. It appends the section and writes the files. |
 | `gateDecision(gate)` | `src/plan/planProgress.ts` | Returns the gate decision from the gate row, its rows and the reviewer verdict. It is pure. |
+| `chainGate(threadId)` | `src/runtime/nextAction.ts` | Returns the newest gate on the row's `replaces:` chain, planned or unplanned. It only reads. |
+| `gateOf(row)`, `gateLine(gate, decision)` | `src/runtime/nextAction.ts` | `gateOf` returns the gate and its decision for a row: its own gate, else the open unplanned chain gate. `gateLine` renders the gate's next call. |
+| `fixAdmission`, `docsRepairGate` | `src/runtime/delegation.ts` | `fixAdmission` admits the fix run and the docs repair of a gate, and refuses every other second repair. `docsRepairGate` names the unplanned gate whose docs repair a row is. |
 | `completionRefusal` | `src/runtime/completion.ts` | Refuses `chief_complete` unless the row's gate decision is `pass`. |
 | `review_gates` | `src/db/migrations.ts` | Stores one row for each gate: its key, its pinned targets and its reviewer and fix ids. The tester and corrector columns are legacy. |
 | `bb.settings.define` | `server.ts` | Defines `reviewEngine` and `prAgentDir`. |
@@ -136,11 +142,14 @@ The review start chooses the base ref of the slice for each target without a pin
 `startReview` opens the review gate of a worker, or joins it. The gate is described in Review Gate. A review of a plan covers every target of the gate.
 
 1. It checks the worker and the Chief that owns it. A second call for the same gate joins the first call.
-2. It loads the gate, or opens it in one batch. It pins each target: the pull request head, else the branch head from `git ls-remote origin refs/heads/<branch>`. All targets of one pull request share one pinned head. On an existing gate, each launch re-pins the targets first, and a pin error refuses the call before any launch.
+2. It loads the gate, or opens it in one batch. It pins each target: the pull request head, else the branch head from `git ls-remote origin refs/heads/<branch>`. All targets of one pull request share one pinned head. On an existing gate, each launch re-pins the targets first, and a pin error refuses the call before any launch. The gate key of an unplanned worker follows Chain gate.
 3. It checks the builder environment. The tree must be clean, and the pinned commit must contain the builder HEAD. A failed check refuses the call and names the target and the recovery. It never falls back to a mutable checkout.
    - A builder checkout that is not on the plugin host refuses the call before the gate opens. The plugin cannot prove its clean tree or its pushed HEAD there, so it never treats the checkout as clean. The refusal names the worker and one recovery: move the checkout to the plugin host, so the plugin can read its clean tree and HEAD. Then call `chief_review` again. Commit and push on the remote host alone does not satisfy it, because the plugin still cannot read that checkout.
    - Reason: a gate on an older origin commit would review code that the builder does not hold. Refusing first keeps the pin honest.
 4. It launches the reviewer when the gate has none or its reviewer failed or blocked, or one advisory re-review (see Re-review). With a live reviewer on an existing gate, it starts nothing. A failed reviewer launch throws, with a retry hint.
+   - When it starts nothing and the gate's reviewer is busy on its live BB thread, the reply names that reviewer and says nothing started.
+   - When it starts nothing and the reviewer is not busy, the reply is the gate's next executable call (`gateLine`). It never says that the reviewer runs. Reason: a finished reviewer that the reply names as running gives Chief no next step.
+   - When that reviewer ended its turn without a `chief_report`, the reply is the no-report recovery: inspect it, then `chief_continue` it for its report. Reason: an ended turn never sends the report it owes, so waiting on it stalls the review.
 5. It reads the impact slices. They never refuse a review. Each success carries the changed paths and the docs history.
 6. It writes `review-context.md` to the attempt folder, before the launch. It makes 3 attempts with 1 s then 2 s of backoff. The file content is the context plus a newline. An empty context writes no file.
 7. It builds the brief and launches the reviewer in a fresh managed worktree on the pinned commit. The prompt names the absolute path that the write returned.
@@ -260,15 +269,31 @@ The review gate is the one review of a plan. It gives one verdict for every targ
 
 ### Gate identity
 
-- A gate has the key `plan:<planner id>`, or `task:<first id of the task chain>` for unplanned work. Reason: the key names the owner of the gate without a wave.
+- A gate has the key `plan:<planner id>`, or `task:<id>` for unplanned work. The id is the first id of the task chain, or the worker id as Chain gate describes. Reason: the key names the owner of the gate without a wave.
 - A gate row stores its targets: thread id, report number, branch, pull request URL and pinned head. It also stores the ids of its reviewer and fix rows. The columns `tester_thread_id` and `corrector_thread_id` are legacy. Only `gateFor` and the completion cascade read them, for old gates. Nothing writes them.
 - The gate pins its targets when it opens. Each later `chief_review` that launches a reviewer (restart, re-review) re-reads every target head and rewrites only the head sha. The report number stays. Reason: a relaunched reviewer must work on the branch's current head, and the report number still detects a changed target.
 - A re-pin reads the pull request head, else the origin branch tip. It runs no builder check. A pin error refuses the call before any launch.
 - Gate rows have no plan wave. Wave scheduling ignores them. Reason: a gate reviewer is not an implementation wave.
 
+### Chain gate
+
+The chain gate links a worker to the review gate that covers its task. A chat fix and its successors share the chain of a completed target, so the chain gate tells an open gate from a closed one.
+
+- The resolver walks the `replaces:` chain of a row, newest row first. It returns the first gate that owns a row on the chain, planned or unplanned, or none. It only reads.
+- A gate is open while some target is not complete. It is closed when every target is complete.
+- The key of an unplanned worker follows the first case that holds:
+  1. An open unplanned chain gate: `chief_review` reuses its key and adds no target. Reason: a fix run of an open gate joins that gate.
+  2. A closed or planned chain gate: `chief_review` opens a new gate with key `task:<worker id>`, and the worker is its target. Reason: a closed gate keeps its verdicts, and a planned gate has no unplanned review.
+  3. No chain gate: the key is `task:<first id of the chain>`, as before.
+- A completed worker gets the refusal of Opening and refusals. A closed gate is never reopened, re-pinned or reused by a later worker of its chain. Reason: the closed gate is the record of the earlier review.
+- `gateOf` returns the row's own gate. Without one, it returns the chain gate when the row is unplanned and the chain gate is open. Reason: `chief_review`, `chief_complete` and the roster then resolve the same gate for a row.
+- A chat fix that joins an open chain gate is not a target of that gate. Its `chief_complete` follows that gate's decision. Reason: the chat fix must not complete before the gate passes.
+- A planned worker keeps the key `plan:<planner id>`. The resolver does not apply to it.
+
 ### Opening and refusals
 
 - `chief_review (workerThreadId: W)` opens the gate, or joins it. A call with a live reviewer names it and starts nothing, except one advisory re-review. Reason: a retry must not start a second reviewer.
+- A completed worker that belongs to a closed gate gets a refusal, before any re-pin or launch. The refusal names the fresh-worker route: `chief_delegate (replaces: W, kind: worker)`, then `chief_review` on the new worker. Reason: a closed gate is the record of a finished review, so a second review needs a worker with its own gate.
 - The call refuses while the readiness rules of the plan refuse the wave. Those rules cover design waves, the plan's Spec Writer while it is missing or not settled, legacy Spec Writers that are not settled, and restacks.
 - For unplanned work, the call refuses while the worker, or the task's newest Spec Writer, is not settled. Settled means ready, idle after a ready report, or complete, as in Pending writer in [plan-chains.md](plan-chains.md). Reason: the gate waits so that it never pins a revision before the worker and its newest Spec Writer finish publishing it.
 - The call refuses when the builder tree is dirty. It also refuses when the pinned commit does not contain the builder HEAD. Reason: the review must see the code that the builder has, and the Spec Writer fold may be ahead of it.
@@ -290,8 +315,9 @@ The review gate is the one review of a plan. It gives one verdict for every targ
 
 ### Delegation while the gate is open
 
-- A gate target cannot be replaced with `replaces:` while the gate is open, except by the gate's fix run. The refusal names the first target as `replaces: <first target>`. Reason: fixes go through the gate, so a second row must not take over the pinned target.
+- A gate target cannot be replaced with `replaces:` while the gate is open, except by the gate's fix run or by a docs repair. The refusal names the first target as `replaces: <first target>`. Reason: fixes go through the gate, so a second row must not take over the pinned target.
 - A gate fix run keeps the first target live. Reason: the target completes with the gate.
+- A docs repair that replaces a gate target keeps that target live too. Reason: the target completes only through its gate.
 
 ### Completion
 
@@ -300,7 +326,7 @@ The review gate is the one review of a plan. It gives one verdict for every targ
 - A pass stamps `cleanup_approved_at` on the target and on the gate actors. Reason: cleanup needs proof of a pass.
 - `skipReview` completes a row without the gate. It never stamps `cleanup_approved_at`. Reason: a skipped review is not a pass.
 - `override` completes a row without the gate. It never stamps `cleanup_approved_at`. The note reads `Completed without the review gate: <reason>`. Reason: an override is Chief's decision, not a review result.
-- An implementation-lane Spec Writer completes when its `replaces:` chain reaches a gate target whose gate passed. The gate's pass line names it. It needs no hand-off worker and no override. Reason: the existing passed gate covers this repair path, and an unnecessary hand-off worker would have no gate.
+- An implementation-lane Spec Writer completes when its `replaces:` chain reaches a gate target whose gate passed. The chain may pass through the gate's fix run. The gate's pass line names it. It needs no hand-off worker and no override. Reason: the existing passed gate covers this repair path, and an unnecessary hand-off worker would have no gate.
 
 ### Gate decision
 
@@ -312,10 +338,12 @@ The review gate is the one review of a plan. It gives one verdict for every targ
 | 2 | The reviewer is missing, failed, blocked, archived or deleted. | `restart` | `chief_review (workerThreadId: W)` again starts the reviewer. |
 | 3 | The reviewer or the fix run is busy. | `wait` | Names the busy side. |
 | 4 | The reviewer reported, no fix run exists, and a blocking code finding exists. Or the fix run never reported and is idle, blocked or failed. | `fix` | `chief_delegate (replaces: <first target>, kind: worker)`, once. When the fix run never reported, `replaces: <fix run>`. |
-| 5 | Docs findings exist, and the gate has two or more Spec Writers. | `escalate` | Names each writer and `chief_delegate (replaces: <that writer>, kind: spec-writer)`. Chief checks every repair, then completes with `override`. |
-| 6 | Docs findings exist, and no Spec Writer repair was created after the verdict and is ready. | `docsRepair` | `chief_delegate (replaces: <that branch's latest side-lane Spec Writer>, kind: spec-writer)`. When no such writer exists, `escalate`. |
-| 7 | The fix run is blocked or failed. | `escalate` | Names the blocker. A blocked run may get `chief_continue` first. |
-| 8 | Otherwise. | `pass` | Completion is allowed. |
+| 5 | Docs findings exist, and the current docs repair is blocked. | `escalate` | Names the repair and its blocker. `chief_continue (threadId: <repair>)` answers the blocker in place, or escalate. The repair already reported, so waiting would stall. |
+| 6 | Docs findings exist, and the current docs repair is still working. | `wait` | Names the repair. |
+| 7 | Docs findings exist, and the gate has two or more Spec Writers. | `escalate` | Names each writer and `chief_delegate (replaces: <that writer>, kind: spec-writer)`. Chief checks every repair, then completes with `override`. |
+| 8 | Docs findings exist, and no Spec Writer repair was created after the verdict and is ready. | `docsRepair` | `chief_delegate (replaces: <repair row>, kind: spec-writer)`. The repair row is the branch's latest side-lane Spec Writer on a planned gate. On an unplanned gate it is that writer, else the ready or complete fix run, else the first target. A planned gate without such a writer gives `escalate`. |
+| 9 | The fix run is blocked or failed. | `escalate` | Names the blocker. A blocked run may get `chief_continue` first. |
+| 10 | Otherwise. | `pass` | Completion is allowed. |
 
 Rules:
 
@@ -323,23 +351,39 @@ Rules:
 - A docs finding routes only to a Spec Writer repair or to escalation. Reason: only a Spec Writer changes docs.
 - A gate with two or more Spec Writers escalates a blocking docs finding when no repair exists after the verdict. The text names each writer and the call `chief_delegate (replaces: <that writer>, kind: spec-writer)`. Such a gate never passes on its own: Chief checks every repair, then completes the targets with `override`. Reason: a finding names no owner, so the plugin picks no writer and cannot prove that each finding has a repair.
 - A `docsRepair` is refused while the fix run is busy. Reason: one writable owner holds the gate at a time.
+- An unplanned gate with docs findings and no Spec Writer gives `docsRepair`, not `escalate`. Reason: docs findings need a repair route, and an unplanned gate has no side-lane writer.
 - A `pass` needs docs settled. Docs are settled when no docs finding exists. With one Spec Writer, docs are also settled when a repair was created after the verdict and every current repair is settled. With two or more Spec Writers, a repair never settles the docs: Chief completes the gate with `override`. A current repair is one that no later repair replaces. An approve, or a `request_changes` whose only blocking findings are docs, can pass when those docs are settled. Reason: the decision reads the reviewer verdict and the docs state together. The plugin cannot assign findings to writers when two or more exist.
 - A fix run that is ready or complete, with docs settled, gives `pass`. No test field decides. Reason: the fix run ran the tests on the fixed code, so the old findings no longer decide.
 - A fix run that fails gives `escalate`. A fix run that never reported gives `fix` again. Reason: a failed run keeps its evidence, and a fresh row would lose it.
 
 ### Fix Run
 
-A `fix` decision admits one fix run. No other repair route exists. The gate has no second fix run and no rejection ladder. Reason: the fix run is the last word of the gate, and a loop of fixes would never end.
+A `fix` decision admits one fix run for code findings. The gate has no second fix run and no rejection ladder. The only other repair route is the docs repair (see Docs Repair). Reason: the fix run is the last word of the gate, and a loop of fixes would never end.
 
 - The fix run is a fresh `kind: worker`. It replaces the first target of the gate: `chief_delegate (replaces: <first target>, kind: worker)`. `chief_delegate` admits it only when `gateDecision` is `fix`, and only once, unless it replaces a fix run that never reported. The admission requires the explicit `kind`, and `replaces:` without `kind` is refused. Reason: the kind decides the lane, and an implicit kind can start the wrong row.
 - The fix run reuses the first target's environment, branch and pull request. Reason: the fix commit goes on the branch that the gate reviewed.
 - The first target is not superseded. It stays live and completes with the gate. Reason: the open-gate guard, the gate line and the chat fix order read the target row.
 - A fix run that never reported does not hold its slot. Its replacement takes the slot with `kind: worker`. The stopped run completes as superseded. A run that reported keeps its slot. Reason: a stopped run that held the one slot stranded the gate.
-- A second fix run is refused, except as the replacement of a fix run that never reported. Its text reads: `The gate already had its fix run (F): escalate to the user.`
+- A second fix run is refused, except as the replacement of a fix run that never reported, or as a docs repair. Its text reads: `The gate already had its fix run (F): escalate to the user.`
 - The fix run brief names the gate's reviewer verdict file and findings, even when the reviewer row is complete. Reason: the fix run needs the same evidence as the gate.
 - The fix run never changes `docs/`. Reason: only a Spec Writer changes docs.
 - The fix run writes and runs the tests that its fix needs. It reports ready only when every test command, lint, build and the Verify command exited 0, each listed with its exit status. Reason: the gate passes on this report, and no other role runs the tests.
 - A blocked fix run gives `escalate`, for any blocker. The next action tells Chief to answer the blocker with `chief_continue`, or to escalate. A failed fix run gives `escalate`. Reason: the gate has one fix run, so no second repair row exists.
+
+### Docs Repair
+
+A docs repair is a `kind: spec-writer` delegation that replaces a row of an unplanned gate. A Spec Writer fixes the docs findings. The docs repair is the one exception to the one-fix-run rule. The decision note [Spec Writer may repair docs on an unplanned gate](../decisions/2026-11-25-spec-writer-docs-repair-exception.md) records the trade-off.
+
+- `chief_delegate (replaces: <repair row>, kind: spec-writer)` admits a docs repair only when the gate is unplanned, `gateDecision` is `docsRepair`, and `replaces:` names that exact row. Reason: the decision names the row that the repair replaces.
+- A gate that passes on code findings, or that is not `docsRepair`, refuses a docs repair. Reason: the repair exception covers docs findings only.
+- The repair row is the gate's writer target when one exists. Otherwise it is the ready or complete fix run, or else the first target. Reason: the row keeps the checkout and branch that the gate reviewed.
+- A docs repair that replaces the fix run completes that run as superseded. Reason: a replaced run takes no further work.
+- A docs repair that replaces a gate target never completes that target. The target completes only through `chief_complete` after the gate passes.
+- A busy branch holder still blocks a docs repair. A holder counts as busy on its live BB thread, not on its managed row. A ready row whose live thread is active still blocks it. Idle gate targets and an idle fix run do not block it. Reason: a row can be ready while its thread writes, and an idle row writes nothing.
+- A blocked docs repair gives `escalate` with its in-place route (`chief_continue`), not `wait`. Reason: the blocked repair already reported, so waiting would wait for a report it sent.
+- A docs repair reuses the checkout of the row that it replaces. Reason: the repair writes docs on the branch that the gate reviewed.
+- `kind: worker`, or no kind, replacing a ready fix run stays refused. Reason: the docs repair is the only second route, and it writes docs only.
+- A planned gate keeps `escalate` when it has docs findings and no side-lane Spec Writer. Reason: a planned gate has its own writer lane, and its docs route stays as before.
 
 ### Chat Fix
 
@@ -351,7 +395,9 @@ A change that the owner asks for after completion gets a chat fix. It gets no re
 - The chat fix runs with `fix_run='chat'`. It reuses that row's environment, and its brief tells it to fetch and fast-forward to the origin branch before it edits.
 - The chat fix gets no old findings. Its mission is the chat request.
 - The chat fix's docs check uses that pinned target's plan chain and pull request base. It accepts Spec Writer commits of that chain only. A later chat fix keeps the same target. Reason: a commit from an unrelated chain is not part of this pull request.
-- The chat fix completes on its own green run: a `ready` report and a passing `docsGate`. It stamps `cleanup_approved_at` when cleanup is active. Reason: the report is the worker's evidence, and the plugin reads no test field.
+- A chat fix that opens its own gate (`chief_review` on the chat fix) gets the key `task:<chat fix id>`. Its `chief_complete` follows that gate and needs the gate to pass. Reason: without its own gate, the chat fix would complete with no review.
+- A chat fix completes on its own green run only when the gate resolver finds no gate for it: a `ready` report and a passing `docsGate`. It stamps `cleanup_approved_at` when cleanup is active. Reason: the report is the worker's evidence, and the plugin reads no test field.
+- A chat fix that joined an open chain gate completes only when that gate's decision is `pass`. Reason: the shared resolver must not let the chat fix skip a gate that waits or requests repairs.
 
 ## Contracts and Invariants
 
@@ -378,7 +424,21 @@ A change that the owner asks for after completion gets a chat fix. It gets no re
 | Unknown paths or unknown docs history keep `## Docs ownership`. | A failed lookup never removes a rule. |
 | The engine changes no ledger, verdict storage, approve gate, or lesson rule. The engine appears only in the result text. | The engine is a way to form a verdict, not a new owner. |
 | One writable owner holds a gate at a time: the first target, then the fix run. A docs repair runs only while the fix run is not busy. | Two writers on one checkout can overwrite each other's commits. |
+| For an unplanned worker, `chief_review` and `chief_complete` resolve the same gate. A row never gets "has no review gate" while `chief_review` claims a gate for it. | One gate answers each row, so Chief gets one next call. |
+| `chief_review` never says that a reviewer runs when that reviewer is not busy. It returns the gate's next call. | A reply with no next step stalls the review. |
+| `chief_review` starts at most one reviewer for the same state. | A repeated call never starts a second reviewer. |
+| A closed gate is never reused by a later worker of its chain. A new gate with key `task:<worker id>` opens instead. | The closed gate keeps its targets and verdicts. |
+| Planned gates keep the key `plan:<planner id>`, and their docs findings with no side-lane Spec Writer give `escalate`. | Only unplanned gates get the new routes. |
+| `kind: worker`, or no kind, replacing a ready fix run is refused. Only a `kind: spec-writer` docs repair on an unplanned gate is admitted. | One fix run per gate, and docs writers only for the second route. |
+| A docs repair never completes a gate target. | The target completes only with its gate. |
+| A completed worker of a closed gate gets a refusal, and no re-pin or launch runs. | The closed gate keeps its verdicts. |
+| A chat fix that joined an open chain gate completes only when that gate passes. | The chat fix must not bypass the gate. |
+| A reviewer that ends without `chief_report` gets the no-report recovery in the `chief_review` reply. | An ended turn never sends the report it owes. |
+| A docs repair is admitted only for the exact row of a `docsRepair` decision, with no busy holder. | A code-only pass and a busy branch both need no repair. |
+| A blocked docs repair gets `escalate` with its in-place `chief_continue` route. | The blocked repair already reported, so waiting stalls. |
 
 ## Related Decisions
 
 - [Translate pr-agent output without re-verification](../decisions/2026-11-06-pr-agent-no-reverify.md)
+- [One fix run per gate](../decisions/2026-11-18-single-review-gate.md)
+- [Spec Writer may repair docs on an unplanned gate](../decisions/2026-11-25-spec-writer-docs-repair-exception.md)

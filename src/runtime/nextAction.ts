@@ -112,12 +112,21 @@ export function createNextAction(ctx: Ctx) {
 
   const gateStartLine = (workerThreadId: string) => `Start the review gate: chief_review (workerThreadId: ${workerThreadId}). It starts one reviewer.`;
 
-  /** A row's review gate and its decision, or null when no gate names the row. */
+  /** The newest gate any row of the thread's replaces: chain belongs to, read-only. */
+  function chainGate(threadId: string): ReviewGate | undefined {
+    for (const id of ledger.taskChain(threadId)) { const gate = store.gateFor(id); if (gate) return gate; }
+    return undefined;
+  }
+  const gateIsOpen = (gate: ReviewGate) => gate.targets.some((target) => store.get(target.threadId)?.state !== "complete");
+
+  /** A row's review gate and its decision, or null when no gate names the row. An unplanned row that no gate names yet
+   * belongs to its chain's open gate: a chat fix or Spec Writer that replaced a gate target. */
   function gateOf(row: ManagedRow): { gate: ReviewGate; decision: GateDecision<ManagedRow> } | null {
-    const gate = store.gateFor(row.thread_id);
+    const chain = chainGate(row.thread_id);
+    const gate = store.gateFor(row.thread_id) ?? (chain && !chain.plan_thread_id && gateIsOpen(chain) ? chain : undefined);
     if (!gate) return null;
     const ids = gate.targets.map((target) => target.threadId);
-    const chainIds = new Set(ids.flatMap((id) => ledger.taskChain(id)));
+    const chainIds = new Set([...ids, ...(gate.fixer_thread_id ? [gate.fixer_thread_id] : [])].flatMap((id) => ledger.taskChain(id)));
     const writers = store.all().filter((other) => isWriter(other.kind) && other.role === "worker"
       && (gate.plan_thread_id ? other.plan_thread_id === gate.plan_thread_id : chainIds.has(other.thread_id) || chainIds.has(other.replaces_thread_id ?? "")));
     const settledReviewer = ledger.newestVerdictReviewer(ids);
@@ -147,7 +156,7 @@ export function createNextAction(ctx: Ctx) {
         return `The review gate needs a fix: ${verdictRef} has ${decision.codeFindings} blocking code finding${decision.codeFindings > 1 ? "s" : ""}. Delegate the gate's one fix run: chief_delegate (replaces: ${replaced}, kind: worker); its brief carries the verdict and the findings. Its ready run passes the gate; after it, one advisory re-review may run with chief_review (workerThreadId: ${first}).`;
       }
       case "docsRepair":
-        return `The review gate's code passed, but ${verdictRef} has docs findings: chief_delegate (replaces: ${decision.writer.thread_id}, kind: spec-writer) with them as its mission, then wait for its ready report.`;
+        return `The review gate's code passed, but ${verdictRef} has docs findings: chief_delegate (replaces: ${decision.replaces.thread_id}, kind: spec-writer) with them as its mission, then wait for its ready report.`;
       case "escalate": return `The review gate cannot pass on its own: ${decision.why}. Escalate to the user.`;
       case "pass": {
         // An implementation-lane Spec Writer that replaced a target completes on this pass too.
@@ -304,7 +313,18 @@ export function createNextAction(ctx: Ctx) {
 
   const { startReview, startBranchReview } = createReviewStart<ManagedRow>({
     db, store, ledger, managedSpawn: ctx.managedSpawn, controlsThread: (...a) => ctx.controlsThread(...a),
-    plan: { reviewRefusal, reviewTargetsFor, planWavesFor, specWriters, taskWriters: ctx.taskWriters, planBaseOf: ctx.planBaseOf },
+    plan: {
+      reviewRefusal, reviewTargetsFor, planWavesFor, specWriters, taskWriters: ctx.taskWriters, planBaseOf: ctx.planBaseOf,
+      chainGate: (threadId) => { const gate = chainGate(threadId); return gate && { gate, open: !gate.plan_thread_id && gateIsOpen(gate) }; },
+      // A reviewer that ended its turn without a chief_report gets the no-report recovery; any other gate state gets the gate's own line.
+      nextLine: (gate) => {
+        const reviewer = store.get(gate.reviewer_thread_id ?? "");
+        if (reviewer && ctx.turnMissingReport(reviewer)) return missingReportLine(reviewer);
+        const gated = gateOf(store.get(repairTarget(gate).threadId)!)!;
+        return gateLine(gated.gate, gated.decision);
+      },
+      reviewerBusy: async (threadId) => BUSY_STATUSES.has((await bb.sdk.threads.get({ threadId })).status),
+    },
     host: {
       settledLive: async (worker) => {
         const live = await waitIdleAfterReport(worker);

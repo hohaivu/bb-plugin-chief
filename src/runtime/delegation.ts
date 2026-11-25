@@ -231,6 +231,12 @@ export function createDelegation(ctx: Ctx) {
     return out;
   }
 
+  /** The unplanned gate whose docs repair a Spec Writer replacing `prior` is: the gate decision is docsRepair and names exactly that row. Undefined for any other delegation. */
+  function docsRepairGate(prior: ManagedRow | undefined, kind: string | undefined): ReviewGate | undefined {
+    const gated = prior && kind === "spec-writer" ? ctx.gateOf(prior) : null;
+    return gated && !gated.gate.plan_thread_id && gated.decision.kind === "docsRepair" && gated.decision.replaces.thread_id === prior!.thread_id ? gated.gate : undefined;
+  }
+
   type FixAdmission = { run: "gate"; gate: ReviewGate } | { run: "chat"; gate?: undefined };
 
   /** A replaces: that is a fix run: the gate's one fix run (replaces the gate's repair target), or a chat fix
@@ -255,6 +261,8 @@ export function createDelegation(ctx: Ctx) {
       if (decision.kind !== "fix") throw new Error(`Review gate ${gate.gate_key} needs no fix run. ${ctx.gateLine(gate, decision)}`);
       return { run: "gate", gate };
     }
+    // The one exception to the one-fix-run rule: an unplanned gate's docs repair, a Spec Writer replacing its settled fix run.
+    if (gate && gate.fixer_thread_id === prior.thread_id && docsRepairGate(prior, kind)) return null;
     if (gate && prior.state !== "complete" && gate.fixer_thread_id === prior.thread_id) throw new Error(escalate(prior.thread_id));
     if (prior.state === "complete" && (prior.fix_run || gate?.targets.some((target) => target.threadId === prior.thread_id))) {
       if (kind !== "worker") throw new Error(`A change after completion is a fix run: chief_delegate (replaces: ${prior.thread_id}, kind: worker).`);
@@ -309,6 +317,12 @@ export function createDelegation(ctx: Ctx) {
         throw new Error(`Review gate ${gate.gate_key}'s fix run ${busyFixer.thread_id} is still working on the branch: wait for its report, then repair the docs.`);
       }
     }
+    const docsRepair = docsRepairGate(prior, params.kind);
+    // A pinned target or fix run other than the replaced row gives way only when its live BB thread is idle too, not just its managed row.
+    const liveBusy = new Set<string>();
+    for (const id of docsRepair ? [...docsRepair.targets.map((target) => target.threadId), docsRepair.fixer_thread_id] : []) {
+      if (id && id !== prior!.thread_id && BUSY_STATUSES.has((await bb.sdk.threads.get({ threadId: id })).status)) liveBusy.add(id);
+    }
     const resolved = resolveDelegation(params, prior);
     const { issueUrl, verifyCommand } = resolved;
     // A fix run is no plan wave: a gate's fix run stays linked to the gate's plan; a chat fix is linked to none.
@@ -347,7 +361,9 @@ export function createDelegation(ctx: Ctx) {
         // A gate fix run works on the pinned targets' branch: its targets do not hold it.
         && !(fix?.gate && fix.gate.targets.some((target) => target.threadId === row.thread_id))
         // A docs repair does not wait on a gate's fixer that is no longer busy; a busy one still holds the branch.
-        && !(isWriter(kind) && gate && !BUSY_STATUSES.has(row.state) && gate.fixer_thread_id === row.thread_id)
+        && !(isWriter(kind) && gate && !BUSY_STATUSES.has(row.state) && !liveBusy.has(row.thread_id) && gate.fixer_thread_id === row.thread_id)
+        // An unplanned gate's docs repair: its idle targets give way (the repair works on their branch and completes none of them).
+        && !(docsRepair && !BUSY_STATUSES.has(row.state) && !liveBusy.has(row.thread_id) && docsRepair.targets.some((target) => target.threadId === row.thread_id))
         // A legacy tester or corrector that is not busy does not hold the branch on the gate's repair paths; a busy one still does, whatever it last reported.
         && !((fix?.gate || isWriter(kind)) && gate && [gate.tester_thread_id, gate.corrector_thread_id].includes(row.thread_id)
           && !BUSY_STATUSES.has(row.state)))
@@ -414,7 +430,8 @@ export function createDelegation(ctx: Ctx) {
       }
     }
     // A gate's first target stays live: it completes with the gate. A replaced gate fix run is superseded like any other.
-    if (prior && !(fix?.run === "gate" && fix.gate.targets.some((target) => target.threadId === prior.thread_id))) store.completeSuperseded(prior.thread_id, Date.now());
+    const keepsTarget = (fix?.run === "gate" ? fix.gate : docsRepair)?.targets.some((target) => target.threadId === prior?.thread_id);
+    if (prior && !keepsTarget) store.completeSuperseded(prior.thread_id, Date.now());
     void (!prior && !planThreadId ? ctx.trackerSync.start(store.get(thread.id)!, params.mission) : ctx.trackerSync.join(store.get(thread.id)!));
     return { threadId: thread.id, title: params.title, projectId };
   }

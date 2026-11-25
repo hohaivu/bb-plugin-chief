@@ -121,11 +121,19 @@ describe("gateDecision: docs findings go to a Spec Writer repair, never to a fix
 
   test("a docs finding with one gate Spec Writer and no repair yet is docsRepair to it", () => {
     const gate = gateOf({ targets: [TARGET, { ...TARGET, threadId: "SW1" }] });
-    expect(decide([docsReviewer()], { gate, writers: [writerRow("SW1", { created_at: BEFORE_VERDICT })] })).toMatchObject({ kind: "docsRepair", writer: expect.objectContaining({ thread_id: "SW1" }) });
+    expect(decide([docsReviewer()], { gate, writers: [writerRow("SW1", { created_at: BEFORE_VERDICT })] })).toMatchObject({ kind: "docsRepair", replaces: expect.objectContaining({ thread_id: "SW1" }) });
   });
 
-  test("a docs finding with no Spec Writer on the branch escalates", () => {
-    expect(decide([docsReviewer()], { writers: [] }).kind).toBe("escalate");
+  test("a planned gate's docs finding with no side-lane Spec Writer escalates", () => {
+    expect(decide([docsReviewer()], { gate: gateOf({ plan_thread_id: "P" }), writers: [] }).kind).toBe("escalate");
+  });
+
+  test("an unplanned gate's docs finding with no fix run is docsRepair replacing its first target", () => {
+    expect(decide([docsReviewer()], { writers: [] })).toMatchObject({ kind: "docsRepair", replaces: expect.objectContaining({ thread_id: "W" }) });
+  });
+
+  test("an unplanned gate's docs finding after a ready fix run is docsRepair replacing the fix run", () => {
+    expect(decide([docsReviewer(), fixerRow()], { gate: gateOf({ fixer_thread_id: "FX" }), writers: [] })).toMatchObject({ kind: "docsRepair", replaces: expect.objectContaining({ thread_id: "FX" }) });
   });
 
   test("a busy repair created after the verdict is wait", () => {

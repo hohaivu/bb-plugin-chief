@@ -430,6 +430,12 @@ export interface ReviewStartDeps<Row extends ReviewRow> {
     taskWriters?: (row: Row, chainIds: string[]) => Row[];
     /** A plan row's chain base (stacked or branch-based), `skipped` while unresolved, or null for the project default. Optional: older callers omit it, and every wave is unstacked. */
     planBaseOf?: (row: Row) => { base: string } | { skipped: string } | null;
+    /** The newest gate on a thread's replaces: chain, and whether it is an unplanned gate with a target still incomplete (a planned gate is never open here). Optional: older callers omit it, and the gate key is the chain root's. */
+    chainGate?: (threadId: string) => { gate: ReviewGate; open: boolean } | undefined;
+    /** The gate's one next-call line. Optional: older callers omit it, and a reviewer that is not busy gets the "already runs" reply. */
+    nextLine?: (gate: ReviewGate) => string;
+    /** Whether the reviewer's live BB turn is still running. Optional: older callers omit it, and the reviewer counts as busy. */
+    reviewerBusy?: (reviewerThreadId: string) => Promise<boolean>;
   };
   controlsThread: (row: Row, callerChiefId: string) => boolean;
   host: ReviewHost<Row>;
@@ -550,7 +556,15 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
     for (const target of targets) {
       if (!controlsThread(target, caller.thread_id) || target.project_id !== caller.project_id) throw new Error(`No managed worker ${target.thread_id} for this Chief.`);
     }
-    const gateKey = worker.plan_thread_id ? `plan:${worker.plan_thread_id}` : `task:${ledger.taskChain(workerThreadId).at(-1) ?? workerThreadId}`;
+    // An unplanned worker joins its chain's open unplanned gate; after a closed or planned ancestor gate its work opens `task:<worker>`.
+    // A closed gate is never reused: a worker that already owns one is complete and gets no second review.
+    const chained = worker.plan_thread_id ? undefined : plan.chainGate?.(workerThreadId);
+    if (chained && !chained.open && chained.gate.gate_key === store.gateFor(workerThreadId)?.gate_key) {
+      throw new Error(`Worker ${workerThreadId} already finished review gate ${chained.gate.gate_key}; a completed worker is not reviewed again. Hand new work to a fresh worker: chief_delegate (replaces: ${workerThreadId}, kind: worker), then chief_review it when it is ready.`);
+    }
+    const gateKey = worker.plan_thread_id ? `plan:${worker.plan_thread_id}`
+      : chained ? (chained.open ? chained.gate.gate_key : `task:${workerThreadId}`)
+      : `task:${ledger.taskChain(workerThreadId).at(-1) ?? workerThreadId}`;
     return dedupe(gateKey, async () => {
       const down = (id: string | null) => { const actor = id ? store.get(id) : undefined; return !actor || ["failed", "blocked", "archived", "deleted"].includes(actor.state); };
       let gate = store.gate(gateKey);
@@ -567,9 +581,10 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         && ledger.reviewersWithVerdict(ids, gate!.created_at) === 1;
       const startReviewer = !gate || (afterFix ? rereview : down(gate.reviewer_thread_id));
       if (gate && !startReviewer) {
+        const running = !plan.nextLine || !plan.reviewerBusy || await plan.reviewerBusy(gate.reviewer_thread_id!);
         return {
           threadId: gate.reviewer_thread_id!, title: store.get(gate.reviewer_thread_id!)!.title, created: false,
-          reply: `The review gate ${gateKey} already runs reviewer ${gate.reviewer_thread_id}; nothing started.`,
+          reply: running ? `The review gate ${gateKey} already runs reviewer ${gate.reviewer_thread_id}; nothing started.` : plan.nextLine!(gate),
         };
       }
       const projectDir = await host.projectPath(worker.project_id);
