@@ -142,10 +142,10 @@ Base for worker rows is commit 37d959d. Base for plan-chain rows is commit a2196
   1. An advisor row never repeats the planner line. Only the chain owner renders a line.
   2. A blocked advisor's text moves to the planner's `chief_plan revises` line.
   3. An idle planner, advisor or revision without a Report gets the Missing-Report line, when it is the owner.
-  4. A reactivated delivered epic revision shows its "complete both" line when it is idle.
+  4. A reactivated delivered epic revision shows its completion line when it is not busy: idle, failed or stopped.
   5. A busy delivered revision shows no line.
   6. A blocked revision with an idle original shows one line, on the revision row.
-  7. An archived or deleted attempt drops out. The original owns the chain again.
+  7. An archived or deleted row is excluded, and the owner table applies to the rows that remain. See Rules.
   8. `chief_consult` refuses while an idle usable advisor has no advice. This is the same rule that Pending uses.
 - The `noreport` alert and its retry check change. They are not Pending changes. See Alert below.
 - `bb chief status` prints the line in its text output, because the text output prints the same Pending block. Its JSON output does not print it.
@@ -217,6 +217,7 @@ The first row that matches wins.
 | Review `required`, advisor attempt | `advising` | the advisor attempt |
 | Review `required`, no advisor attempt | `consult` | P |
 | Review `approved` | `approved` | P |
+| Review `changes`, delivered epic revision already complete | `revised` | P |
 | Review `changes`, delivered revision | `revised` | the delivered revision |
 | Review `changes`, revision attempt | `revising` | the revision attempt |
 | Review `changes`, no usable revision | `revise` | P, with the decider |
@@ -228,10 +229,11 @@ Only the owner row renders a line in Pending. The lines are:
 
 - `planning`: a blocked P gets the generic blocked line. An idle P without a Report gets the Missing-Report line. Otherwise no line.
 - `advising`: an idle advisor without a Report gets the Missing-Report line. Otherwise no line.
-- `consult`, `approved`, `plan`: the planner route of P. This is the next call for P, as at a219693.
+- `consult`: the consult-again line for P when the required review has no advisor attempt. A failed, stopped or archived advisor leaves no attempt. Otherwise the planner route of P.
+- `approved`, `plan`: the planner route of P. This is the next call for P, as at a219693.
 - `revise`: the `chief_plan revises` line for P. When the decider is blocked, the line starts with the blocked advisor text.
 - `revising`: a blocked revision gets the `chief_plan revises` line for P. An idle revision without a Report gets the Missing-Report line. Otherwise no line.
-- `revised`: the planner route of the delivered revision. An epic revision gets the "complete both" line. A task revision gets the delegate-waves line.
+- `revised`: the planner route of the owner, once the owner is not busy: the delivered revision, or P when an epic revision is complete. The route shows also when the owner failed or was stopped. An epic revision gets the "complete both" line, or the complete call for P once the revision is complete. A task revision gets the delegate-waves line.
 - `closed`: no line.
 
 #### Rules
@@ -242,16 +244,17 @@ Only the owner row renders a line in Pending. The lines are:
 - A blocked advisor's text appears only in the planner's `chief_plan revises` line. Reason: the planner revises the plan.
 - In an alert, a chain row that is not the owner renders the owner's line. Reason: an advisor's ready alert still names the planner's next call.
 - A delivered revision keeps the chain when it goes busy or idle again. Reason: the delivered result stands until Chief completes it.
-- An archived or deleted row drops out. The original owns the chain again. Reason: Chief cannot act on a removed thread.
+- A failed owner shows no line, except a delivered revision, which keeps its held route. Reason: a delivered result still needs its completion call, and a failed row cannot act.
+- An archived or deleted row is excluded. The owner table applies to the rows that remain. An older usable advisor or revision can then own the chain. For an open epic with no remaining delivered revision or revision attempt, P owns the chain again. A completed task stays closed. Reason: Chief cannot act on a removed thread.
 - The planner row, not the advisor row, owns the approved or changes outcome. See [planner owns the plan outcome](../decisions/2026-11-25-planner-owns-plan-outcome.md).
 
 #### Consult and revision refusals
 
-- `chief_consult` refuses while the advisor attempt is busy or idle. For an idle attempt, the refusal names `chief_continue` for that advisor, which asks for its `chief_report`. Reason: not stated in the code.
-- `chief_plan` refuses a planner report while the advisor attempt exists. Reason: not stated in the code.
+- `chief_consult` refuses while the advisor attempt is busy or idle. For an idle attempt, the refusal names `chief_continue` for that advisor, which asks for its `chief_report`. Reason: one usable advisor holds the review, so a second consult would duplicate it.
+- `chief_report` refuses a guarded planner report while the advisor attempt exists. A guarded report is any epic report, or a ready report that carries a plan. Reason: a replacement plan or epic report would drop the advisor's gate and overwrite the reviewed result.
 - `chief_plan revises` refuses while a usable delivered revision exists, in any live state. Reason: the delivered result stands until Chief completes it.
-- After the delivered revision is archived or deleted, an epic original owns the chain again, and `chief_plan revises` admits a new revision. Reason: the removed revision no longer holds the result.
-- `chief_plan revises` still admits a new revision over an idle or blocked undelivered attempt. The new revision supersedes it, as at a219693. Reason: not stated in the code.
+- After the delivered revision is archived or deleted, the owner table applies to the remaining rows. For an open epic with no remaining delivered revision or revision attempt, P owns the chain again. If its review asked for changes, `chief_plan revises` admits a new revision. A completed task stays closed and refused. Reason: the removed revision no longer holds the result.
+- `chief_plan revises` still admits a new revision over an idle or blocked undelivered attempt. The new revision supersedes it, as at a219693. Reason: an undelivered attempt holds no result, so superseding it loses none. A busy attempt still refuses.
 
 ### Alert
 
