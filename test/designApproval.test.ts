@@ -24,6 +24,12 @@ async function approvedDesigner(waves: object[]) {
   return { state, chief, planner, designer, pending, approve };
 }
 const routes = (text: string) => [...text.matchAll(/chief_delegate \(planThreadId: [^)]*\)/g)].map((match) => match[0]);
+// BB reports a turn that ended without chief_report: the row goes ready -> active -> idle while its latest report stays ready.
+const idleWithoutReport = async (state: Awaited<ReturnType<typeof setup>>, threadId: string) => {
+  await state.harness.behavior.emitThreadEvent("thread.active", { thread: { ...state.live.get(threadId)!, status: "active" } });
+  await state.harness.behavior.emitThreadEvent("thread.idle", { thread: { ...state.live.get(threadId)!, status: "idle" }, lastAssistantText: "looked again" });
+  expect(rowOf(state, threadId)).toMatchObject({ state: "idle", last_report_state: "ready" });
+};
 const askForApproval = (designer: string) => `chief_owner_approval (workerThreadId: ${designer}`;
 
 describe("an approved design wave", () => {
@@ -63,6 +69,32 @@ describe("an approved design wave", () => {
     expect(cleared).not.toContain(successor);
     expect(workerOn(state, planner.threadId, 2)).toBeUndefined();
   });
+
+  test("an idle designer whose earlier report is still ready: reply and Pending name the same route, and following it delegates the successor", async () => {
+    const { state, chief, planner, designer, pending, approve } = await approvedDesigner([{ body: PLAN_FIXTURE, design: true }, { body: wave(2), dependsOn: [1] }]);
+    await idleWithoutReport(state, designer);
+    expect(await pending()).toContain(askForApproval(designer));
+
+    const reply = await approve();
+    const after = await pending();
+    expect(after).not.toContain(askForApproval(designer));
+    expect(routes(after)).toEqual([`chief_delegate (planThreadId: ${planner.threadId}, wave: 2, replaces: ${designer})`]);
+    expect(routes(reply)).toEqual(routes(after));
+
+    const followed = await followRoute(state, chief.threadId, after);
+    expect(followed.params).toMatchObject({ planThreadId: planner.threadId, wave: 2, replaces: designer });
+    expect(workerOn(state, planner.threadId, 2).thread_id).toBe(followed.thread);
+  });
+
+  test("a busy or finished designer gets no route in Pending, approved or not", async () => {
+    const { state, designer, pending, approve } = await approvedDesigner([{ body: PLAN_FIXTURE, design: true }, { body: wave(2), dependsOn: [1] }]);
+    const own = `replaces: ${designer}`;
+    await approve();
+    await state.harness.behavior.emitThreadEvent("thread.active", { thread: { ...state.live.get(designer)!, status: "active" } });
+    expect(await pending()).not.toContain(own);
+    state.db.prepare(`UPDATE managed_threads SET state='failed' WHERE thread_id=?`).run(designer);
+    expect(await pending()).not.toContain(own);
+  });
 });
 
 // Plan intake refuses a design-only chain tip, so a tip is seeded the way a legacy persisted plan holds one: wave 2 re-headed onto its own chain.
@@ -85,5 +117,19 @@ describe("an approved design chain tip", () => {
     await tool(state, "chief_complete", { threadId: designer }, chief.threadId);
     expect(rowOf(state, designer).state).toBe("complete");
   });
-});
+  test("an idle designer on a chain tip: reply and Pending name the same chief_complete call, and it completes the designer", async () => {
+    const { state, chief, planner, designer, pending, approve } = await approvedDesigner([{ body: PLAN_FIXTURE, design: true }, { body: wave(2), dependsOn: [1] }]);
+    const waves = JSON.parse(planWaves(state, planner.threadId));
+    waves[1].dependsOn = [];
+    state.db.prepare(`UPDATE managed_threads SET plan_waves=? WHERE thread_id=?`).run(JSON.stringify(waves), planner.threadId);
+    await idleWithoutReport(state, designer);
+    const complete = `chief_complete (threadId: ${designer})`;
 
+    const reply = await approve();
+    const after = await pending();
+    expect(reply).toContain(complete);
+    expect(after).toContain(complete);
+    await tool(state, "chief_complete", { threadId: designer }, chief.threadId);
+    expect(rowOf(state, designer).state).toBe("complete");
+  });
+});

@@ -232,7 +232,8 @@ export function createNextAction(ctx: Ctx) {
       if (line) return line;
     }
     if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.${row.role === "worker" ? ` ${inPlaceLine(row)}` : ""}`;
-    if (row.state !== "ready") return null;
+    // A design wave that went ready -> active -> idle without a new report still holds its ready report: chief_owner_approval admits it, so Pending shares its route.
+    if (row.state !== "ready" && !(row.state === "idle" && row.last_report_state === "ready" && schedule.isDesignWave(row))) return null;
     if (row.role === "planner") {
       if (!planReview.hasPlan(row)) return null;
       const refusal = planReviewRefusal(row);
