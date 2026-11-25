@@ -466,11 +466,11 @@ describe("checkout freshness", () => {
         w.state.db.prepare("INSERT INTO provider_cooldowns (provider_id, model, until_at, reason, updated_at) VALUES ('codex', 'gpt-6-astra', ?, 'x', 0)").run(Date.now() + 600_000);
         return w.research();
       }, /cooling down/],
-      ["research on a provider out of quota", async (w) => {
+      ["research on a provider that is not installed", async (w) => {
         await w.state.harness.behavior.callRpc("setRoleModel", { hostId: "host_1", role: "researcher", selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" } });
-        w.state.harness.sdk.stub("system.usageLimits", async () => ({ codex: { status: "ok", windows: [{ label: "5h", usedPercent: 100 }] } }));
+        w.state.harness.sdk.stub("system.usageLimits", async () => ({ codex: { status: "not_installed" } }));
         return w.research();
-      }, /out of quota/],
+      }, /not_installed/],
       ["research switched off", async (w) => {
         await w.state.harness.behavior.callRpc("setResearchSettings", { enabled: false });
         return w.research();
