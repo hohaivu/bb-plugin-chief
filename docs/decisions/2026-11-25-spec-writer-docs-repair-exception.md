@@ -14,4 +14,5 @@ A gate admits one fix run, and a fix run never changes docs/. On an unplanned ga
 
 - Docs findings on an unplanned gate get a `chief_delegate` route. Chief does not need an override for them.
 - The docs repair never completes a gate target. The target completes only when the gate passes.
+- A busy branch holder blocks the repair. A blocked repair escalates with `chief_continue`.
 - A repair of a repair writer stays out of scope.
