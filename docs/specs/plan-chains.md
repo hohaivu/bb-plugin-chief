@@ -93,7 +93,7 @@ A plan chain follows this lifecycle:
 1. Chief calls `chief_forge_init` for an unstarted chain head.
 2. The server initializes the tracking issue, creates the task branch, and creates a draft pull request.
 3. Chief calls `chief_delegate` to launch a worker on the chain head.
-4. The server creates a managed worktree checkout on the task branch.
+4. The server creates a managed worktree checkout on the task branch. The checkout starts at origin's tip of the task branch when the task branch sync succeeds (see Task branch base in checkout-freshness).
 5. The head worker executes and reports ready.
 6. Chief calls `chief_delegate` for the next wave using `replaces:` referencing the chain owner.
 7. The server assigns the existing worker environment, task branch, and pull request.

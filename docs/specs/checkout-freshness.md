@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The checkout freshness domain keeps Chief's checkout current before a researcher or planner reads it. It also records in each researcher and planner report which commit that reader saw. A reader started on a branch gets its own worktree on that branch, and Chief's checkout is not used.
+The checkout freshness domain keeps Chief's checkout current before a researcher or planner reads it. It also records in each researcher and planner report which commit that reader saw. A reader started on a branch gets its own worktree on that branch, and it does not read Chief's checkout. Before that worktree starts, the server points the local branch ref at origin's tip. That sync runs git in the project checkout, but it changes only the ref.
 
 ## Domain Terms
 
@@ -17,6 +17,9 @@ The checkout freshness domain keeps Chief's checkout current before a researcher
 - **Shares**: a planner shares Chief's checkout when Chief's environment path equals the project source path.
 - **Recorded branch**: the `branch` value in a reader's thread row. It is null when the reader started without a branch.
 - **Branch reader**: a researcher or planner with a recorded branch. It runs in its own worktree on that branch.
+- **Task branch**: the Git branch of a plan chain. Origin holds its current state.
+- **Local ref**: the branch ref `refs/heads/<branch>` in the project repository. BB cuts a named-branch worktree from it.
+- **Task branch sync**: the step that points a local ref at origin's tip before a worktree starts. See Task branch base.
 
 ## Ownership and Entry Points
 
@@ -83,6 +86,7 @@ Chief names a branch with `branch` on `chief_research`, `chief_plan`, or `chief_
 - The launch names a host, a managed worktree, and the base branch. It never reuses Chief's environment and never uses `project-default`.
 - The launch stores `branch` in the thread row. The busy check and the report stamp read it.
 - The `chief_research` reply says `in a fresh worktree on branch <branch>` in place of `in your checkout`.
+- Before the spawn, the server runs the task branch sync. The sync never blocks the spawn (see Task branch base).
 
 ### Fast-forward before a spawn
 
@@ -194,6 +198,25 @@ Each contract carries its reason.
 - A plan revision with no `branch` inherits the recorded branch of the plan it revises. Reason: the revision plans the same branch as the plan it revises.
 - A plan consult with no `branch` uses its planner's recorded branch when it has one. Reason: the advisor reviews the planner's branch.
 
+### Task branch base
+
+- `createManagedSpawn` calls `syncTaskBranch` before it spawns a thread in a managed worktree on a named branch. Reason: BB cuts that worktree from the local ref.
+- The sync covers every such launch. That includes workers, Spec Writers, planners, advisors, researchers, and branch reviews.
+- A launch with a `reuse`, `project-default`, or default environment runs no sync and no git command. Reason: those launches do not cut a worktree from a named branch.
+- `syncTaskBranch` skips a project whose checkout is not on the primary host, and it logs one warning line. Reason: the server runs git only on the primary host.
+- `pointBranchAtOrigin` fetches only `refs/heads/<branch>` from origin. Reason: origin holds the current state of the task branch.
+- `pointBranchAtOrigin` creates the local ref when it is missing. Reason: BB needs a local ref to cut the worktree from.
+- `pointBranchAtOrigin` moves the local ref to origin's tip when the local ref is behind it. Reason: the forge writes the local ref once, at an empty `Start:` commit, and no code moves it after that.
+- `pointBranchAtOrigin` also moves the local ref when it has no file change past its merge base with origin. Reason: such commits are empty `Start:` commits and hold no work.
+- `pointBranchAtOrigin` keeps the local ref when it has file changes past its merge base with origin. Reason: the move could leave that work without a branch.
+- `pointBranchAtOrigin` keeps the local ref when origin has no such branch. Reason: origin is the source of the task branch.
+- `pointBranchAtOrigin` keeps the local ref when a worktree has the branch checked out. Reason: git refuses to move a checked-out branch.
+- `pointBranchAtOrigin` moves the local ref with `git branch -f`, never with `git update-ref`. Reason: `git branch -f` keeps git's refusal for a checked-out branch.
+- `pointBranchAtOrigin` never changes HEAD, the index, or a file in the project checkout, and it never pushes. Reason: the sync moves a ref only.
+- A second sync with the same origin tip changes no ref. Reason: a repeat call has no effect.
+- A sync failure never throws and never stops the spawn. Reason: a skip must never stop a spawn, and the worker's `git merge --ff-only` step stays the backstop.
+- `syncTaskBranch` has one absolute deadline of 30 s. Reason: it uses the same bound as a freshness call.
+
 ### Deadlines
 
 - One freshness call has one absolute deadline of 30 s.
@@ -219,6 +242,9 @@ Each contract carries its reason.
 - "Moved" means a different SHA. It does not mean ancestry or chronology.
 - Researchers share Chief's checkout by default. A researcher gets its own worktree only when Chief names a branch (user decision 2026-11-14, stacked-branch work).
 - Chief's cleanup does not remove a researcher's branch worktree, because researcher rows are never cleanup-eligible.
+- Origin is the source of truth for a task branch. The local ref is plumbing that the server moves before each new worktree.
+- A task branch sync may add up to 30 s to a spawn call on a slow network.
+- A local ref with file changes that origin lacks stays where it is. A new worktree on that branch then starts from that ref.
 - Planner worktrees in projects whose default is a worktree are not fast-forwarded. Only the stamp covers them.
 - Path comparison is by string, with no realpath step. A symlinked path that differs as a string reads as a separate checkout. The planner call stays silent, as before this change.
 - A concurrent second `chief_research` or `chief_plan` call meets git's own lock. It becomes an ordinary skip warning.
@@ -232,4 +258,5 @@ Each contract carries its reason.
 - No worktree for each researcher unless Chief names a branch.
 - No fast-forward of worker, reviewer, or advisor environments.
 - No `origin/HEAD`, `main`, or `master` fallback when the environment has no `defaultBranch`.
+- No task branch sync for a `reuse` environment. Reason: the worker's `git merge --ff-only` step covers a reused worktree.
 - No change to the `chief_report` schema.
