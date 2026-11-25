@@ -90,6 +90,8 @@ export function gateDecision<Row extends ProgressRow>(input: {
   const codeFindings = findings.length - docsFindings.length;
   if (!fixer && codeFindings) return { kind: "fix", codeFindings };
   if (docsSettled) return { kind: "pass" };
+  // A blocked repair already reported: waiting on it would wait for a report it sent. Its blocker is answered in place, or escalated.
+  if (!!docsFindings.length && repair?.state === "blocked") return { kind: "escalate", why: `docs repair ${repair.thread_id} is blocked (${(repair.blocker ?? "no blocker given").slice(0, 200)}): answer its blocker with chief_continue (threadId: ${repair.thread_id}), or escalate` };
   if (docsWait) return { kind: "wait", who: [repair!] };
   if (multiDocs) return multiEscalate;
   // A planned gate's repair needs a side-lane writer. An unplanned gate has none: the Spec Writer replaces its ready fix run, else its first target.

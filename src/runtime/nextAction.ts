@@ -315,8 +315,15 @@ export function createNextAction(ctx: Ctx) {
     db, store, ledger, managedSpawn: ctx.managedSpawn, controlsThread: (...a) => ctx.controlsThread(...a),
     plan: {
       reviewRefusal, reviewTargetsFor, planWavesFor, specWriters, taskWriters: ctx.taskWriters, planBaseOf: ctx.planBaseOf,
-      chainGate: (threadId) => { const gate = chainGate(threadId); return gate && !gate.plan_thread_id ? { gate, open: gateIsOpen(gate) } : undefined; },
-      nextLine: (gate) => { const gated = gateOf(store.get(repairTarget(gate).threadId)!)!; return gateLine(gated.gate, gated.decision); },
+      chainGate: (threadId) => { const gate = chainGate(threadId); return gate && { gate, open: !gate.plan_thread_id && gateIsOpen(gate) }; },
+      // A reviewer that ended its turn without a chief_report gets the no-report recovery; any other gate state gets the gate's own line.
+      nextLine: (gate) => {
+        const reviewer = store.get(gate.reviewer_thread_id ?? "");
+        if (reviewer && ctx.turnMissingReport(reviewer)) return missingReportLine(reviewer);
+        const gated = gateOf(store.get(repairTarget(gate).threadId)!)!;
+        return gateLine(gated.gate, gated.decision);
+      },
+      reviewerBusy: async (threadId) => BUSY_STATUSES.has((await bb.sdk.threads.get({ threadId })).status),
     },
     host: {
       settledLive: async (worker) => {

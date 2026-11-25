@@ -43,9 +43,11 @@ test("a ready fix permits one advisory re-review even if it also requests change
   await world.open(worker.threadId);
   const second = world.gate().reviewer_thread_id;
   expect(second).not.toBe(reviewer);
+  world.state.live.set(second, { ...world.state.live.get(second)!, status: "active" }); // the fake starts threads idle; a running reviewer is active
   await world.open(worker.threadId);
   expect(world.gate().reviewer_thread_id).toBe(second);
   await world.verdict(second, "request_changes");
+  world.setIdle(second);
   await world.call("chief_review", { workerThreadId: worker.threadId }); // the finished advisory reviewer starts nothing
   expect(world.gate().reviewer_thread_id).toBe(second);
   await world.complete(worker.threadId);
