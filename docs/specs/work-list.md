@@ -158,9 +158,22 @@ Two idle rows skip step 2 and keep their route from step 3:
 - An idle design row whose latest report is `ready` keeps the approved-design route. Reason: `chief_owner_approval` admits that report. The reply and the Pending line must name the same route.
 - An idle epic planner whose report intake refuses every report keeps its decision or delivery line. The refusal covers a decided epic, a delivered revision, and a planner with an advisor in review. Reason: A new `chief_report` cannot be accepted, so a retry line would stall the epic.
 
+### Delivered epic revision
+
+An epic revision is delivered by its ready report. Reason: Report intake refuses any later report from it.
+
+- A later idle turn without a Report does not reopen the revision.
+- Pending, `chief_consult` and `chief_plan` (`revises`) read one predicate, `epicDelivered` in `src/plan/planReview.ts`. Reason: Report intake and these routes must agree.
+- Each of these names the same calls: `chief_complete` of the revision and of the original. `chief_plan` refuses a second revision.
+- A blocked revision attempt stays open. Reason: A blocked report does not deliver the revision, so its retry stays valid.
+
+### Plan advisor
+
 A plan advisor has its own rule.
 
 - A deciding advisor shows its planner's review line, if one applies. It never shows the Missing-Report line.
+- For a `request_changes` decision, the advisor's row omits the line when the planner's own row shows the same call. The advisor's report alert and a blocked advisor's escalation keep the line. Reason: Pending names one owner for the revision call.
+- An approved plan's advisor shows the approval and the planner's next action. It shows no line while the planner is idle without a Report. Reason: The planner's row holds the recovery step.
 - An advisor with no decision (`advised_at` null) shows the Missing-Report line on its own row, when its planner still waits on it. Reason: The advisor's row holds the `chief_continue` call for that advisor, so the line belongs there.
 - A stale advisor shows no line. A stale advisor is one whose planner is no longer `required` (`advisorStale` in `src/plan/planReview.ts`). Reason: `chief_continue` cannot resume a stale advisor.
 
