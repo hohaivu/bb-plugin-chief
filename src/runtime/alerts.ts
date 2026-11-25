@@ -88,7 +88,7 @@ export function createAlerts(ctx: Ctx) {
     }
     if (kind === "noreport") {
       const row = store.get(source);
-      return row && row.state === "idle" && row.active_cycle === Number(parts[0]) ? null : "noreport no longer applies";
+      return row && ctx.turnMissingReport(row) && row.active_cycle === Number(parts[0]) ? null : "noreport no longer applies";
     }
     if (!kind.startsWith("coordinator-") || kind === "coordinator-ended") return null;
     const child = store.get(source);

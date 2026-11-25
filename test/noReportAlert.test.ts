@@ -15,6 +15,9 @@ describe("finished-without-report alert", () => {
   };
   const noreport = (state: S, id: string) => (state.db.prepare(`SELECT dedupe_key, message FROM alert_outbox WHERE dedupe_key LIKE ? ORDER BY dedupe_key`)
     .all(`${id}:noreport:%`) as { dedupe_key: string; message: string }[]);
+  const call = (state: S, tool: string, params: object, threadId: string) => state.harness.behavior.callAgentTool(tool, params, { threadId, projectId: "proj_1" });
+  const roster = async (state: S, chiefId: string) => String(await call(state, "chief_roster", {}, chiefId));
+  const rosterLine = async (state: S, chiefId: string, workerId: string) => (await roster(state, chiefId)).split("\n").find((l) => l.includes(`(${workerId}):`));
   const cycle = (state: S, id: string) => (state.db.prepare(`SELECT active_cycle FROM managed_threads WHERE thread_id=?`).get(id) as any).active_cycle;
 
   test("managed spawns carry parentNotifications stuck; a Chief spawn does not", async () => {
@@ -45,9 +48,25 @@ describe("finished-without-report alert", () => {
 
   test.each([
     ["ready", { state: "ready", result: "Totals fixed" }],
+    ["active", { state: "active", result: "Still going" }],
+  ])("a worker idle without a report stays in the roster until a %s report; reading it sends no alert", async (_name, report) => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await turn(state, worker.threadId, "I stopped at step 3");
+    const line = await rosterLine(state, chief.threadId, worker.threadId);
+    expect(line).toBeTruthy();
+    expect(await rosterLine(state, chief.threadId, worker.threadId)).toBe(line);
+    expect(noreport(state, worker.threadId)).toHaveLength(1);
+    await call(state, "chief_report", report, worker.threadId);
+    expect(await roster(state, chief.threadId)).not.toContain(line!);
+  });
+
+  test.each([
+    ["ready", { state: "ready", result: "Totals fixed" }],
     ["blocked", { state: "blocked", blocker: "No API access", recommendation: "Grant it" }],
     ["active", { state: "active", result: "Waiting on the user" }],
-  ])("a turn with a %s report sends no noreport alert", async (_name, report) => {
+  ])("a turn with a %s report sends no noreport alert", async (name, report) => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
@@ -56,5 +75,6 @@ describe("finished-without-report alert", () => {
     expect(state.db.prepare(`SELECT 1 FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${worker.threadId}:report:%`)).toBeTruthy();
     await state.harness.behavior.emitThreadEvent("thread.idle", { thread: { ...state.live.get(worker.threadId)!, status: "idle" }, lastAssistantText: "done" });
     expect(noreport(state, worker.threadId)).toEqual([]);
+    if (name === "active") expect(await rosterLine(state, chief.threadId, worker.threadId)).toBeUndefined();
   });
 });

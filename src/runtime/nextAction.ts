@@ -233,7 +233,10 @@ export function createNextAction(ctx: Ctx) {
     }
     if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.${row.role === "worker" ? ` ${inPlaceLine(row)}` : ""}`;
     // A design wave that went ready -> active -> idle without a new report still holds its ready report: chief_owner_approval admits it, so Pending shares its route.
-    if (row.state !== "ready" && !(row.state === "idle" && row.last_report_state === "ready" && schedule.isDesignWave(row))) return null;
+    // That approved-design route (#296) is authoritative and comes before the generic missing-Report recovery below.
+    const heldDesign = row.state === "idle" && row.last_report_state === "ready" && schedule.isDesignWave(row);
+    if (!heldDesign && ctx.turnMissingReport(row)) return `Finished its turn without a chief_report. Inspect it with chief_inspect (threadId: ${row.thread_id}), then chief_continue it asking for its chief_report, or decide yourself.`;
+    if (row.state !== "ready" && !heldDesign) return null;
     if (row.role === "planner") {
       if (!planReview.hasPlan(row)) return null;
       const refusal = planReviewRefusal(row);

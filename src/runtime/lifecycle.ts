@@ -174,8 +174,7 @@ export function createLifecycle(ctx: Ctx) {
     const state = observed === "idle" && ["ready", "blocked", "complete"].includes(row.state) ? row.state : observed;
     store.recordState(thread.id, state, thread.status ?? observed, now);
     // Parent notifications are `stuck`, so BB no longer reports a turn that ended without chief_report: Chief hears it here, once per cycle.
-    if (kind === "idle" && state === "idle" && row.chief_thread_id
-      && !db.prepare(`SELECT 1 FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${row.thread_id}:report:${row.active_cycle}:%`)) {
+    if (kind === "idle" && turnMissingReport(store.get(row.thread_id)!)) {
       const text = lastText || await ctx.lastOutput(row.thread_id);
       await ctx.alertChief(row, `noreport:${row.active_cycle}`, [
         `${row.role} “${row.title}” (${row.thread_id}) finished its turn without a chief_report.`,
@@ -218,7 +217,13 @@ export function createLifecycle(ctx: Ctx) {
       ...(unrecorded ? [unrecorded] : []),
     ].join("\n"));
   }
-  return { intake, lifecycle, managedRow, reconcile, reconcileThread };
+  /** The one answer to "did this row's current turn end idle without a chief_report": the alert, its retry check and chief_roster all ask it.
+   * Every chief_report (an `active` one too) writes a `report:<cycle>:` outbox row and delivered rows are kept, so the answer is stable. */
+  function turnMissingReport(row: ManagedRow): boolean {
+    return row.role !== "chief" && !!row.chief_thread_id && row.state === "idle"
+      && !db.prepare(`SELECT 1 FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${row.thread_id}:report:${row.active_cycle}:%`);
+  }
+  return { intake, lifecycle, managedRow, reconcile, reconcileThread, turnMissingReport };
 }
 
 export function registerLifecycle(ctx: Ctx) {
