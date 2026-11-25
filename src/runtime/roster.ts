@@ -30,6 +30,9 @@ export function createRoster(ctx: Ctx) {
         ? `Once it is idle, start a fresh review with chief_review (workerThreadId: ${row.worker_thread_id}).`
         : `Once it is idle, chief_complete it, then start a fresh chief_review for branch ${row.branch}.`;
     }
+    if (row.role === "planner" && row.replaces_thread_id && ctx.planReview.revisions(row.replaces_thread_id).delivered?.thread_id === row.thread_id) {
+      return "Once it is idle, its delivered result stands and another revision is refused: follow its next action (the chief_complete call).";
+    }
     if (row.role === "planner" && row.replaces_thread_id) return `Once it is idle, start a fresh chief_plan (revises: ${row.replaces_thread_id}) with a narrower brief; the review round is already used.`;
     if (row.role === "planner") return "Once it is idle, start a fresh chief_plan with a narrower brief.";
     if (row.role === "advisor" && row.plan_thread_id) {

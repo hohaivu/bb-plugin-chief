@@ -59,8 +59,8 @@ export function createPlanReview<Row extends ReviewRow>(all: () => Row[], get: (
     // A stored value no tool writes: no refusal or next action, only the roster's changes-requested wording.
     | { kind: "unrecognized"; decider?: Row; by?: Row };
 
-  /** A planner's review state. `delivered` (changes only) is the one delivered-revision rule: an epic revision delivers with its ready report
-   * and the original stays open until Chief completes both; a task revision's plan intake completes the original (completeSuperseded). */
+  /** A planner's review state. `delivered` (changes only) is the one delivered-revision rule: a usable delivered revision, or a completed task original
+   * (a task revision's plan intake completes it: completeSuperseded). An epic original stays open until Chief completes both. */
   function status(planner: Row) {
     const epic = !!planner.plan_epic;
     const { attempt, decider } = advisors(planner.thread_id);
@@ -71,7 +71,7 @@ export function createPlanReview<Row extends ReviewRow>(all: () => Row[], get: (
     else if (planner.plan_review !== "changes") review = { kind: "unrecognized", decider, by: revisions(planner.thread_id).delivered };
     else {
       const { delivered: by, busy: working } = revisions(planner.thread_id);
-      review = { kind: "changes", decider, by, busy: working, delivered: epic ? !!by : planner.state === "complete" };
+      review = { kind: "changes", decider, by, busy: working, delivered: !!by || (!epic && planner.state === "complete") };
     }
     return { epic, closed: epic && planner.state === "complete", revises: planner.replaces_thread_id, review };
   }
@@ -139,7 +139,8 @@ export function createPlanReview<Row extends ReviewRow>(all: () => Row[], get: (
       case "required": return advisor ? { kind: "advising", owner: advisor.thread_id } : { kind: "consult", owner: P.thread_id };
       case "approved": return { kind: "approved", owner: P.thread_id };
       case "changes":
-        if (delivered) return { kind: "revised", owner: delivered.thread_id };
+        // A completed epic revision hands the chain back to P: its only open call is chief_complete (P).
+        if (delivered) return { kind: "revised", owner: P.plan_epic && delivered.state === "complete" ? P.thread_id : delivered.thread_id };
         if (attempt) return { kind: "revising", owner: attempt.thread_id };
         return { kind: "revise", owner: P.thread_id, decider };
       default: return { kind: "plan", owner: P.thread_id };

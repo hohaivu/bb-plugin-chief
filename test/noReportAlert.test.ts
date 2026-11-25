@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { delegate, disposeAll, planTwoWaves, setup, start, status } from "./harness";
+import { setLive } from "./flowHelpers";
 import { provideSdk } from "./sdk";
 
 provideSdk(sdkTesting);
@@ -225,5 +226,70 @@ describe("a plan chain has one Pending owner", () => {
     const before = state.spawned.length;
     await revise(state, chief.threadId, planner.threadId);
     expect(state.spawned.length).toBe(before + 1);
+  });
+
+  // Each chief_complete target in the Pending block, as its row's label.
+  const completes = async (state: S, chiefId: string, labels: Record<string, string>) => String(await call(state, "chief_roster", {}, chiefId)).split("\n")
+    .filter((line) => line.startsWith("- ")).flatMap((line) => [...line.matchAll(/chief_complete \(threadId: (thr_\w+)\)/g)].map((m) => labels[m[1]] ?? "other"));
+  const deliveredRevision = async (state: S, chiefId: string) => {
+    const { planner } = await epicWithAdvisor(state, chiefId, "request_changes");
+    const revision = await revise(state, chiefId, planner.threadId);
+    await call(state, "chief_report", { state: "ready", result: "Epic: https://github.com/o/r/issues/2" }, revision.threadId);
+    return { planner, revision, labels: { [planner.threadId]: "original", [revision.threadId]: "revision" } };
+  };
+
+  test("a delivered epic revision completed first hands the chain to the original: one complete call after each step", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const { planner, revision, labels } = await deliveredRevision(state, chief.threadId);
+    expect(await completes(state, chief.threadId, labels)).toEqual(["revision", "original"]);
+
+    await call(state, "chief_complete", { threadId: revision.threadId }, chief.threadId);
+    expect(await pending(state, chief.threadId, labels)).toMatchInlineSnapshot(`
+      [
+        "planner original: chief_complete",
+      ]
+    `);
+    expect(await completes(state, chief.threadId, labels)).toEqual(["original"]);
+
+    await call(state, "chief_complete", { threadId: planner.threadId }, chief.threadId);
+    expect(await pending(state, chief.threadId, labels)).toMatchInlineSnapshot(`[]`);
+  });
+
+  test.each(["failed", "stopped"])("a delivered epic revision that went active and then %s keeps one complete route and refuses another revision", async (how) => {
+    const state = await setup();
+    const chief = await start(state);
+    const { planner, revision, labels } = await deliveredRevision(state, chief.threadId);
+    setLive(state, revision.threadId, "active");
+    if (how === "failed") {
+      setLive(state, revision.threadId, "failed");
+      await state.harness.behavior.emitThreadEvent("thread.failed", { thread: state.live.get(revision.threadId)!, lastAssistantText: "boom" });
+    } else {
+      const reply = String(await call(state, "chief_stop", { threadId: revision.threadId, reason: "looping" }, chief.threadId));
+      expect(reply).not.toContain("revises");
+    }
+    expect(await pending(state, chief.threadId, labels)).toMatchInlineSnapshot(`
+      [
+        "planner revision: chief_complete chief_delegate chief_forge_init",
+      ]
+    `);
+    expect(await completes(state, chief.threadId, labels)).toEqual(["revision", "original"]);
+    const before = state.spawned.length;
+    await expect(revise(state, chief.threadId, planner.threadId)).rejects.toThrow();
+    expect(state.spawned.length).toBe(before);
+  });
+
+  test("a task plan whose only advisor was archived without advice: one line on the planner, consulting again, not delegating", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const { planner } = await planTwoWaves(state, chief.threadId);
+    await call(state, "chief_consult", { planThreadId: planner.threadId, title: "Plan", mission: "Review this plan" }, chief.threadId);
+    const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
+    await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(advisor.threadId)! });
+    expect(await pending(state, chief.threadId, { [planner.threadId]: "planner", [advisor.threadId]: "advisor" })).toMatchInlineSnapshot(`
+      [
+        "planner planner: chief_consult",
+      ]
+    `);
   });
 });

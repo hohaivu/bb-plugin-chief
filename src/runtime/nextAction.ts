@@ -167,7 +167,7 @@ export function createNextAction(ctx: Ctx) {
     if (review.kind !== "changes") return null;
     const { by, busy } = review;
     if (epic) {
-      if (by) return `Epic ${P} was revised by ${by.thread_id}: tell the user ${by.thread_id}'s epic link (bb chief inspect ${by.thread_id}), then chief_complete (threadId: ${by.thread_id}) and chief_complete (threadId: ${P}). Delegate nothing.`;
+      if (by) return `Epic ${P} was revised by ${by.thread_id}: tell the user ${by.thread_id}'s epic link (bb chief inspect ${by.thread_id}), then ${by.state === "complete" ? "" : `chief_complete (threadId: ${by.thread_id}) and `}chief_complete (threadId: ${P}). Delegate nothing.`;
       if (busy) return `Epic ${P} is being revised by ${busy.thread_id}: wait for ${busy.thread_id}'s ready alert.`;
       return `The advisor requested changes to epic ${P}: chief_plan (revises: ${P}, title, mission: revise per the advisor) — the plugin attaches the planner's report and the advice; it gets no second review. Delegate nothing.`;
     }
@@ -186,7 +186,6 @@ export function createNextAction(ctx: Ctx) {
       return `Epic revision ${P} is ready; it gets no review. Tell the user ${link}, then chief_complete (threadId: ${P}) and chief_complete (threadId: ${revises}). ${never}`;
     }
     if (review.kind === "approved") return `The epic is approved. Tell the user ${link}, then chief_complete (threadId: ${P}). ${never}`;
-    if (review.kind === "unadvised") return `The advisor review of epic ${P} did not report: chief_consult (planThreadId: ${P}) again, or escalate to the user.`;
     return `Epic ${P} is ready. Run chief_consult (planThreadId: ${P}) once for the advisor's second opinion, then tell the user ${link}. ${never}`;
   }
 
@@ -197,6 +196,7 @@ export function createNextAction(ctx: Ctx) {
     if (!planReview.hasPlan(P)) return null;
     const refusal = planReviewRefusal(P);
     if (refusal) return refusal;
+    if (planReview.status(P).review.kind === "unadvised") return `The advisor review of ${P.plan_epic ? "epic" : "plan"} ${P.thread_id} did not report: chief_consult (planThreadId: ${P.thread_id}) again, or escalate to the user.`;
     if (P.plan_epic) return epicPlannerAction(P);
     const waves = planWavesFor(P.thread_id);
     const { heads, undelegated, waiting } = schedule.undelegatedHeads(P.thread_id, waves);
@@ -216,7 +216,10 @@ export function createNextAction(ctx: Ctx) {
     const chain = planReview.owner(row);
     if (!chain.owner || (!forAlert && chain.owner !== row.thread_id)) return null;
     const owner = store.get(chain.owner);
-    if (!owner || BUSY_STATUSES.has(owner.state) || owner.state === "failed") return null;
+    if (!owner || BUSY_STATUSES.has(owner.state)) return null;
+    // A delivered revision keeps its held completion route once idle, failed or stopped: a second revision is refused.
+    if (chain.kind === "revised") return plannerRoute(owner);
+    if (owner.state === "failed") return null;
     switch (chain.kind) {
       case "planning":
       case "revising":
@@ -236,7 +239,6 @@ export function createNextAction(ctx: Ctx) {
       case "consult":
       case "approved":
       case "plan":
-      case "revised":
         return owner.state === "blocked" ? blockedLine(owner) : plannerRoute(owner);
     }
   }
@@ -262,7 +264,7 @@ export function createNextAction(ctx: Ctx) {
       const line = researcherNextLine(row, ctx.state.plannerActive);
       if (line) return line;
     }
-    if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.${row.role === "worker" ? ` ${inPlaceLine(row)}` : ""}`;
+    if (row.state === "blocked") return `${blockedLine(row)}${row.role === "worker" ? ` ${inPlaceLine(row)}` : ""}`;
     // A design wave that went ready -> active -> idle without a new report still holds its ready report: chief_owner_approval admits it, so Pending shares its route.
     // That approved-design route (#296) is authoritative and comes before the missing-Report recovery. Recovery here covers worker rows (Worker, Designer, Spec Writer); plan-chain rows recover in planChainAction.
     const heldDesign = row.state === "idle" && isReady(row) && schedule.isDesignWave(row);
