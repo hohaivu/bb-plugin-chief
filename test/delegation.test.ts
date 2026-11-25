@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { CLOSE_OUT, NO_DEVIATIONS, PLAN_FIXTURE, approvePlan, completeWorker, delegate, disposeAll, legacyWave, planFile, planTwoWaves, setup, start, status, wave } from "./harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
@@ -946,5 +946,49 @@ describe("heavy-command slots in delegation", () => {
     expect(state.spawned[1].prompt).not.toContain(HEAVY_SECTION);
     expect(existsSync(heavyDir(state))).toBe(false);
     expect(warned(state)).toBe(true);
+  });
+});
+
+// Contracts (docs/specs/plan-chains.md "Command Guard"): startWorker publishes the guard files and marks each new worker, designer and spec-writer
+// thread (a replacing one too); no other role is marked; a failed publish or mark only logs a warning and never fails the delegation.
+describe("command guard in delegation", () => {
+  const guardDir = (state: { storageRoot: string }) => join(state.storageRoot, "chief", "guard");
+  const marked = async (state: { storageRoot: string }) => (await readdir(join(guardDir(state), "threads")).catch(() => [] as string[])).sort();
+  const warned = (state: Awaited<ReturnType<typeof setup>>, text: string) => state.harness.logEntries.some((entry: { level: string; message: string }) => entry.level === "warn" && entry.message.includes(text));
+
+  test("a worker, a designer and a replacing spec-writer are marked; the chief is not", async () => {
+    const state = await setup({ heavyFiles: true });
+    const chief = await start(state);
+    expect(await marked(state)).toEqual([]);
+    const worker = await delegate(state, chief.threadId);
+    expect(await marked(state)).toEqual([worker.threadId]);
+    expect(await readFile(join(guardDir(state), "threads", worker.threadId), "utf8")).toBe(`${worker.threadId}\n`);
+    const designer = await delegate(state, chief.threadId, "Draw the checkout screen", { kind: "designer" });
+    await readyIdle(state, worker.threadId);
+    const writer = await delegate(state, chief.threadId, "Record the docs", { kind: "spec-writer", replaces: worker.threadId });
+    expect(await marked(state)).toEqual([worker.threadId, designer.threadId, writer.threadId].sort());
+    expect((await readdir(guardDir(state))).sort()).toEqual(["guard.mjs", "guard.sh", "install.sh", "pi-extension.ts", "threads"]);
+  });
+
+  test("a failed publish still delegates, with the heavy section in the brief, and warns", async () => {
+    const state = await setup({ heavyFiles: true });
+    state.failWritesMatching(/\/chief\/guard\//);
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    expect(worker.threadId).toBeTruthy();
+    expect(state.spawned).toHaveLength(2);
+    expect(state.spawned[1].prompt).toContain("## Heavy commands");
+    expect(warned(state, "command guard is not published")).toBe(true);
+  });
+
+  test("a failed marker write still delegates and warns", async () => {
+    const state = await setup({ heavyFiles: true });
+    state.failWritesMatching(/\/chief\/guard\/threads\//);
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    expect(worker.threadId).toBeTruthy();
+    expect(state.spawned).toHaveLength(2);
+    expect(await marked(state)).toEqual([]);
+    expect(warned(state, "for the command guard")).toBe(true);
   });
 });

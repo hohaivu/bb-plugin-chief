@@ -377,6 +377,8 @@ export function createDelegation(ctx: Ctx) {
     const heavyPath = isWriter(kind) || !hostId ? null
       : await ctx.settings.get().then((values) => ctx.publishHeavy(hostId, heavySlotCount(values)))
         .catch((error) => { bb.log.warn(`Heavy-command slots are unavailable for ${params.title}: ${String(error)}`); return null; });
+    // The command guard acts only for threads marked after launch; publishing its files never fails or blocks the delegation.
+    if (hostId) await ctx.publishGuard(hostId).catch((error) => bb.log.warn(`The command guard is not published for ${params.title}: ${String(error)}`));
     const planContextLine = planPath !== undefined ? `Plan file (wave ${wave} of ${waveTotal}): ${planPath}` : undefined;
     // Read before the reviewer row is re-pointed below, so a `replaces` chain always
     // hands the fresh worker the review that prompted the handoff.
@@ -414,6 +416,7 @@ export function createDelegation(ctx: Ctx) {
       if (fix.run === "gate") store.setGateActor(fix.gate.gate_key, "fixer_thread_id", threadId);
       store.setFixRun(threadId, fix.run);
     })) || undefined);
+    if (hostId) await ctx.markGuarded(hostId, thread.id).catch((error) => bb.log.warn(`Could not mark ${thread.id} for the command guard: ${String(error)}`));
     // The overflow file is written after the spawn, once the thread's own storage exists; the brief names it by $BB_THREAD_STORAGE.
     if (docsWorkFile) {
       // The file is the only place the omitted source items live, so a failed write rolls the launch back: the new thread is stopped and unlinked

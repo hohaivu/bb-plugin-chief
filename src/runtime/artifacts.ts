@@ -2,6 +2,7 @@ import { type ManagedRow } from "../types";
 import { type ThreadInsert } from "../db/threadStore";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import { guardScript, guardShim, installScript, piExtension } from "../research/commandGuard";
 import { heavyScript } from "../research/heavySlots";
 import type { Ctx } from "./context";
 
@@ -139,6 +140,26 @@ export function createArtifacts(ctx: Ctx) {
     return path;
   }
 
+  /** Publishes the command guard under <BB data dir>/chief/guard/ and returns that folder. Stable names, overwritten when the text differs
+   * (a guard runs for milliseconds, unlike the immutable heavy wrapper). Throws when the data dir is unknown. */
+  async function publishGuard(hostId: string) {
+    const { dir: dataDir, reason } = await hostDataDir(hostId);
+    if (!dataDir) throw new Error(`Host ${hostId}'s BB data dir is unavailable (${reason})`);
+    const guard = join(dataDir, "chief", "guard");
+    const files = { "guard.sh": guardShim(), "guard.mjs": guardScript(), "pi-extension.ts": piExtension(join(guard, "guard.sh")), "install.sh": installScript(guard) };
+    for (const [name, content] of Object.entries(files)) {
+      if ((await readFile(hostId, join(guard, name)).catch(() => null)) !== content) await atomicWrite(hostId, join(guard, name), content);
+    }
+    return guard;
+  }
+
+  /** Marks a Chief worker thread for the command guard: the file `threads/<threadId>` beside guard.sh. Throws when the data dir is unknown. */
+  async function markGuarded(hostId: string, threadId: string) {
+    const { dir: dataDir, reason } = await hostDataDir(hostId);
+    if (!dataDir) throw new Error(`Host ${hostId}'s BB data dir is unavailable (${reason})`);
+    return atomicWrite(hostId, join(dataDir, "chief", "guard", "threads", threadId), `${threadId}\n`);
+  }
+
   /** The artifact's path and text, or null only when the file is missing; any other read failure throws. */
   async function readArtifactIfPresent(threadId: string, projectId: string, name: string) {
     const { hostId, dir } = await artifactDir(threadId, projectId);
@@ -213,6 +234,6 @@ export function createArtifacts(ctx: Ctx) {
     }
     for (const row of rows) void persistBrief(row.thread_id, row.project_id, row.prompt);
   }
-  return { persistBrief, resumeBriefs, readArtifact, readArtifactIfPresent, writeArtifact, writePlan, writeStorageFile, readStorageFile, readStorageFileIfPresent, retryWhileProvisioning, publishHeavy };
+  return { persistBrief, resumeBriefs, readArtifact, readArtifactIfPresent, writeArtifact, writePlan, writeStorageFile, readStorageFile, readStorageFileIfPresent, retryWhileProvisioning, publishHeavy, publishGuard, markGuarded };
 }
 
