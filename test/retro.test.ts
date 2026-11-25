@@ -49,17 +49,27 @@ describe("retro eligibility", () => {
     expect(args.cap).toBe(9);
   });
 
-  // Contract (plan-1 step 11, observability spec): the judge runs on the Researcher role pick of the Chief's machine, or on the workflow's own default
-  // when none is set or the pick is no longer usable. Regression: judging on a research-mode pick (survey/investigate rows) or on a pick the catalog dropped.
+  // Contract: the judge runs on the Research helper pick of the Chief's machine, else the Researcher pick, else the workflow's own default.
+  // Regression: judging on the Researcher pick although a helper pick is set, on a pick the catalog dropped, or on a research-mode pick (survey/investigate rows).
+  const astra = { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" };
+  const mini = { providerId: "codex", model: "gpt-6-mini", reasoningLevel: "medium" };
+  const gone = { providerId: "codex", model: "gone", reasoningLevel: "high" };
+  const astraOut = { provider: "codex", model: "gpt-6-astra", reasoningLevel: "high" };
+  const miniOut = { provider: "codex", model: "gpt-6-mini", reasoningLevel: "medium" };
   test.each([
-    ["a usable researcher pick", { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" }, { provider: "codex", model: "gpt-6-astra", reasoningLevel: "high" }],
-    ["no researcher pick", null, {}],
-    ["a researcher pick the catalog dropped", { providerId: "codex", model: "gone", reasoningLevel: "high" }, {}],
-  ])("the judge run takes its model from the researcher role: %s", async (_name, pick, expected) => {
+    ["a usable helper pick beats the researcher pick", mini, astra, miniOut],
+    ["a usable helper pick and no researcher pick", mini, null, miniOut],
+    ["no helper pick falls back to the researcher pick", null, astra, astraOut],
+    ["a helper pick the catalog dropped falls back to the researcher pick", gone, astra, astraOut],
+    ["no pick at all", null, null, {}],
+    ["only dropped picks", gone, gone, {}],
+  ])("the judge run takes its model from the helper then researcher role: %s", async (_name, helper, researcher, expected) => {
     const { state, stubs, tick } = await judged(() => null);
-    // An old investigate pick must not leak into the judge: only the role row counts.
+    // An old investigate pick must not leak into the judge: only the role rows count.
     state.db.prepare("INSERT INTO research_mode_models (host_id, mode, provider_id, model, reasoning_level, updated_at) VALUES ('host_1', 'investigate', 'claude-code', 'claude-opus-5', 'low', 1)").run();
-    if (pick) await state.harness.behavior.callRpc("setRoleModel", { hostId: "host_1", role: "researcher", selection: pick } as never);
+    for (const [role, selection] of [["research-helper", helper], ["researcher", researcher]] as const) {
+      if (selection) await state.harness.behavior.callRpc("setRoleModel", { hostId: "host_1", role, selection } as never);
+    }
     await tick();
     const argv = stubs.run.mock.calls[0]![0];
     expect(JSON.parse(argv[argv.indexOf("--args") + 1]!).models).toEqual({ judge: expected });
