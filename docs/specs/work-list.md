@@ -145,6 +145,25 @@ A `chief_report` writes a `report:<active_cycle>:` key for a row with a Chief. T
 - A ready plan advisor shows no Missing-Report line when its planner has an approved plan and is idle without a Report. The planner's own row shows the line. Reason: The advisor's line shows the approval. The recovery step belongs to the planner's row.
 - A row that reported shows no Missing-Report line. This covers `ready`, `blocked`, `complete` and an `active` report in the same cycle. Reason: An idle row that reported is not stuck.
 
+### Precedence
+
+`nextAction` checks the rows in this order. The first route that applies wins.
+
+1. Earlier role-specific lines: a gate line, a chat fix run, a `blocked` row, and a researcher line. These come before the Missing-Report line.
+2. The Missing-Report line, when `turnMissingReport` is true.
+3. The ready-state routes of the row: the planner, worker, advisor and reviewer routes.
+
+Two idle rows skip step 2 and keep their route from step 3:
+
+- An idle design row whose latest report is `ready` keeps the approved-design route. Reason: `chief_owner_approval` admits that report. The reply and the Pending line must name the same route.
+- An idle epic planner whose report intake refuses every report keeps its decision or delivery line. The refusal covers a decided epic, a delivered revision, and a planner with an advisor in review. Reason: A new `chief_report` cannot be accepted, so a retry line would stall the epic.
+
+A plan advisor has its own rule.
+
+- A deciding advisor shows its planner's review line, if one applies. It never shows the Missing-Report line.
+- An advisor with no decision (`advised_at` null) shows the Missing-Report line on its own row, when its planner still waits on it. Reason: The advisor's row holds the `chief_continue` call for that advisor, so the line belongs there.
+- A stale advisor shows no line. A stale advisor is one whose planner is no longer `required` (`advisorStale` in `src/plan/planReview.ts`). Reason: `chief_continue` cannot resume a stale advisor.
+
 ### Alert
 
 - The `idle` event sends the `noreport:<cycle>` alert when `turnMissingReport` is true. Reason: The check needs the saved state, not the earlier state.
