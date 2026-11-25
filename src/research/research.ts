@@ -28,7 +28,7 @@ export function researchLine(role: string, settings: ResearchSettings | null) {
 
 /** A researcher's prompt: ticket-blind helper research (stages 1-2), and with design a user-approved design.md (stage 3). */
 export function researcherBrief(input: {
-  /** `helperExecution` and `helperPermissionMode` are what the helper spawn command carries: the Research helper pick, else the researcher's. */
+  /** `helperExecution` and `helperPermissionMode` are what the helper spawn command carries: the Research helper pick, else the researcher's resolved execution. */
   chiefThreadId: string; question: string; design: boolean; helperExecution: Partial<ModelSelection>; helperPermissionMode?: string | null; maxResultLength: number;
 }) {
   const { chiefThreadId, question, design, helperExecution: execution, helperPermissionMode: permissionMode, maxResultLength } = input;
@@ -103,8 +103,8 @@ export interface ResearchDeps {
   discover: <T>(run: (signal: AbortSignal) => Promise<T>, label: string) => Promise<T>;
   /** The shared start-up recipe (section, rules, model pick with cooldown check, spawn, row, brief). */
   managedSpawn: ManagedSpawn<ThreadInsert>;
-  /** The helpers' model pick (Research helper, else Researcher), cooldown-checked; empty means BB's default. */
-  helperExecution: (hostId: string | null, projectId: string) => Promise<Partial<ModelSelection>>;
+  /** The explicit Research helper pick, cooldown-checked (empty: BB's default when the stored pick is unusable); null when none is stored, so the helpers inherit the researcher's execution. */
+  helperExecution: (hostId: string | null, projectId: string) => Promise<Partial<ModelSelection> | null>;
   /** The machine a project's threads run on, and the host a fresh worktree is created on when Chief's own environment names none. */
   projectHost: (projectId: string) => Promise<string>;
   projectHostId: (projectId: string) => Promise<string | null | undefined>;
@@ -195,7 +195,8 @@ export function createResearch(deps: ResearchDeps) {
     // The shared role path: the researcher pick if usable, else BB's default; throws while the target cools down.
     const managed = await managedSpawn.prepare(chief.project_id, { role: "researcher", hostId });
     const { providerId } = managed.execution;
-    const helperExecution = await pickHelperExecution(hostId, chief.project_id);
+    // No explicit helper pick: the helpers run on exactly what the researcher resolved, with no second catalog lookup.
+    const helperExecution = (await pickHelperExecution(hostId, chief.project_id)) ?? managed.execution;
     const offersMode = async (provider: string | undefined) => chiefMode && await providerOffersMode(hostId, provider ?? await projectDefaultProvider(chief.project_id), chiefMode) ? chiefMode : null;
     const permissionMode = await offersMode(providerId);
     const helperPermissionMode = helperExecution.providerId === providerId ? permissionMode : await offersMode(helperExecution.providerId);
