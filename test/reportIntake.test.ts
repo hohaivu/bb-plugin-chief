@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { contractsOf, createReportIntake, sectionOf, type ReportIntakeAdapters } from "../src/report/reportIntake";
 import { createReviewLedger } from "../src/review/reviewLedger";
+import { createPlanReview } from "../src/plan/planReview";
+import { BUSY_STATUSES } from "../src/runtime/constants";
 import { MIGRATIONS } from "../src/db/migrations";
 import type { ManagedRow, ReportParams } from "../src/types";
 import { createThreadStore, type ThreadInsert } from "../src/db/threadStore";
@@ -64,6 +66,7 @@ function world(over: Partial<ReportIntakeAdapters> = {}) {
       ...realLedger,
       recordVerdict: (row, verdict, seq, now) => { log.push(`recordVerdict lessons=${count("chief_lessons")} verdicts=${count("reviewer_verdicts")}`); realLedger.recordVerdict(row, verdict, seq, now); },
     },
+    planReview: createPlanReview<ManagedRow>(store.all, store.get, (status) => BUSY_STATUSES.has(status)),
     lookupRow: async (id) => { log.push("lookupRow"); const row = store.get(id); return row ? { row } : { pending: pendingRows.get(id) }; },
     writePlan: async (_id, _project, _plan, mirrorFor) => { log.push(mirrorFor ? "writePlan(mirror)" : "writePlan"); return [{ path: "/plans/plan-1.md" }, { path: "/plans/plan-2.md" }]; },
     writeArtifact: async (id, _project, name, content) => { log.push(`writeArtifact ${name} [${committed(id)}]`); writes.push({ name, content }); return `/storage/${id}/${name}`; },
