@@ -34,26 +34,30 @@ if (args.run_in_background === true) refuse(BACKGROUND);
 if (typeof args.command !== "string") process.exit(0);
 
 // One pass over the command as the shell reads it: quotes, escapes, comments, here-strings and heredoc bodies are skipped, operators are
-// whole tokens, and a command word counts only in command position (so "cat ./nohup" and "true ||/usr/bin/head" pass).
+// whole tokens, and a command word counts only in command position (so "cat ./nohup" and "true ||/usr/bin/head" pass). Redirection operands
+// and fd prefixes are not command words. A refusal is only recorded while scanning: input the shell would reject (an unterminated quote or
+// an unclosed parenthesis) passes, and the refusal is issued after the scan, once the parse succeeded.
 const WORD_END = /[\s;&|<>()]/;
 const PREFIX = /^(?:[A-Za-z_][A-Za-z0-9_]*=.*|!|\{|if|then|else|elif|do|while|until|time|exec|command|env|sudo)$/;
 const text = args.command;
 const heredocs = [];
-let i = 0, word = "", inWord = false, cmdPos = true, afterPipe = false;
+let i = 0, word = "", inWord = false, cmdPos = true, afterPipe = false, redir = false, depth = 0, bad = false, refusal = null;
+const hit = (reason) => { refusal ??= reason; };
 const flush = () => {
   if (!inWord) return;
   const full = word, base = word.slice(word.lastIndexOf("/") + 1);
   word = ""; inWord = false;
+  if (redir) { redir = false; return; }
   if (!cmdPos) return;
-  if (afterPipe && (base === "tail" || base === "head")) refuse(PIPE);
-  if (base === "nohup" || base === "disown" || base === "setsid") refuse(BACKGROUND);
+  if (afterPipe && (base === "tail" || base === "head")) hit(PIPE);
+  if (base === "nohup" || base === "disown" || base === "setsid") hit(BACKGROUND);
   if (!PREFIX.test(full)) { cmdPos = false; afterPipe = false; }
 };
 while (i < text.length) {
   const c = text[i], n = text[i + 1];
-  if (c === "\\") { if (n === "\n") flush(); else { word += n ?? ""; inWord = true; } i += 2; }
-  else if (c === "'") { const e = text.indexOf("'", i + 1); if (e < 0) break; word += text.slice(i + 1, e); inWord = true; i = e + 1; }
-  else if (c === '"') { let e = i + 1; for (; e < text.length && text[e] !== '"'; e++) if (text[e] === "\\") e++; word += text.slice(i + 1, e); inWord = true; i = e + 1; }
+  if (c === "\\") { if (n === "\n") {} else { word += n ?? ""; inWord = true; } i += 2; }
+  else if (c === "'") { const e = text.indexOf("'", i + 1); if (e < 0) { bad = true; break; } word += text.slice(i + 1, e); inWord = true; i = e + 1; }
+  else if (c === '"') { let e = i + 1; for (; e < text.length && text[e] !== '"'; e++) if (text[e] === "\\") e++; if (e >= text.length) { bad = true; break; } word += text.slice(i + 1, e); inWord = true; i = e + 1; }
   else if (c === "#" && !inWord) { const e = text.indexOf("\n", i); if (e < 0) break; i = e; }
   else if (c === "\n") {
     flush(); i++; cmdPos = true;
@@ -64,15 +68,21 @@ while (i < text.length) {
     }
   }
   else if (/\s/.test(c)) { flush(); i++; }
-  else if (c === "<" && text.startsWith("<<<", i)) { flush(); i += 3; }
+  else if (c === "<" && text.startsWith("<<<", i)) { flush(); i += 3; redir = true; }
   else if (c === "<" && n === "<") {
     flush(); i += 2;
     const dash = text[i] === "-"; if (dash) i++;
     while (text[i] === " " || text[i] === "\t") i++;
     // A delimiter starts with a letter, underscore or quote: "$((1<<2))" is arithmetic, not a heredoc.
     if (/[A-Za-z_'"\\]/.test(text[i] ?? "")) {
+      // The delimiter is one shell word with its quotes removed: quoted whitespace belongs to it.
       let w = "";
-      for (; i < text.length && !WORD_END.test(text[i]); i++) if (!/['"\\]/.test(text[i])) w += text[i];
+      while (i < text.length && !WORD_END.test(text[i])) {
+        const q = text[i];
+        if (q === "'" || q === '"') { const e = text.indexOf(q, i + 1); if (e < 0) { bad = true; i = text.length; break; } w += text.slice(i + 1, e); i = e + 1; }
+        else if (q === "\\") { w += text[i + 1] ?? ""; i += 2; }
+        else { w += q; i++; }
+      }
       heredocs.push({ dash, word: w });
     }
   }
@@ -84,15 +94,21 @@ while (i < text.length) {
     flush();
     if (n === "&") { i += 2; cmdPos = true; afterPipe = false; }
     else if (n === ">") i += text[i + 2] === ">" ? 3 : 2;
-    else refuse(BACKGROUND);
+    else { hit(BACKGROUND); i++; cmdPos = true; afterPipe = false; }
+    if (n === ">") redir = true;
   }
   else if (c === ";") { flush(); i++; cmdPos = true; afterPipe = false; }
-  else if (c === "(") { flush(); i++; cmdPos = true; }
-  else if (c === ")") { flush(); i++; }
-  else if (c === "<" || c === ">") { flush(); i += n === "&" || (c === ">" && n === "|") ? 2 : 1; }
+  else if (c === "(") { flush(); i++; cmdPos = true; redir = false; depth++; }
+  else if (c === ")") { flush(); i++; depth = Math.max(0, depth - 1); }
+  else if (c === "<" || c === ">") {
+    if (inWord && /^[0-9]+$/.test(word)) { word = ""; inWord = false; } else flush();
+    i += n === "&" || (c === ">" && n === "|") ? 2 : 1; redir = true;
+  }
   else { word += c; inWord = true; i++; }
 }
 flush();
+if (bad || depth > 0) process.exit(0);
+if (refusal) refuse(refusal);
 `;
 }
 
@@ -145,7 +161,10 @@ const guardDir = process.env.GUARD_DIR;
 const guardSh = path.join(guardDir, "guard.sh");
 const stop = (why) => { console.log("install.sh: " + file + " " + why + "; nothing changed"); process.exit(1); };
 let text = null;
-try { text = fs.readFileSync(file, "utf8"); } catch (error) { if (error.code !== "ENOENT") stop("cannot be read"); }
+try { text = fs.readFileSync(file, "utf8"); } catch (error) {
+  if (error.code !== "ENOENT") stop("cannot be read");
+  if (fs.lstatSync(file, { throwIfNoEntry: false })) stop("is a link whose target is missing");
+}
 let data = {};
 if (text !== null) {
   try { data = JSON.parse(text); } catch { stop("is not valid JSON"); }

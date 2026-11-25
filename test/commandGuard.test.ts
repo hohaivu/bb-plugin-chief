@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, symlinkSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readlinkSync, symlinkSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -39,6 +39,9 @@ const REFUSED = [
   "echo ok\nnpm test | tail", "cat <<EOF\nbody\nEOF\nls | head",
   "echo '<<EOF'\nls | head", "echo \"<<EOF\"\nsleep 60 &", "# example <<EOF\nls | tail", "cat <<<x\nls | head", "echo $((1<<2))\nsleep 1 &",
   "cat <<EOF | tail\nbody\nEOF", "true || x | /usr/bin/head", "ls |\n head",
+  "cat <<'END MARK'\nbody\nEND MARK\nsleep 1 &", "cat <<\"A B\"\nsleep 1 &\nA B\nls | tail",
+  "npm test | 2>/dev/null head", "cat data | >cut.log tail -n 1", ">/tmp/log nohup npm start", "npm test | 2>&1 tail",
+  "npm test | he\\\nad -n 5", "no\\\nhup npm start",
 ];
 const ALLOWED = [
   "a || head -n 3 f", "head -n 50 file", "tail -n 20 log", "make 2>&1", "cmd &> out.log", "a && b", "echo x >&2",
@@ -46,6 +49,9 @@ const ALLOWED = [
   "bb thread tell --message-file - <<'EOF'\nsent | tail and & more\nEOF", "bb thread tell --message-file - <<-EOF\n\tx | head\n\tEOF\nls",
   "bash /Users/x/.bb/chief/heavy/chief-heavy-0123456789ab.sh test -- npm test", "cat <<<'a | tail'",
   "true ||/usr/bin/head -n 3 f", "echo x >|head", "cat ./nohup", "ls >| setsid", "cat <<EOF\nsleep 1 &\nEOF\nls",
+  ">nohup echo hello", "echo hi 2>head", "cat f <nohup", "echo hi &>setsid",
+  // Input the shell rejects as a whole never runs, so a refusal-looking prefix does not block it.
+  "printf x | tail; echo 'unfinished", "sleep 1 & echo \"unfinished", "ls | head; (echo x", "cat <<'unfinished\nls | tail",
 ];
 
 describe("guard.sh with a marked thread", () => {
@@ -227,6 +233,19 @@ describe("install.sh", () => {
     const fresh = homeWith(null);
     expect(install(dir, fresh).status).toBe(0);
     expect(statSync(settingsPath(fresh)).mode & 0o777).toBe(0o600);
+  });
+
+  test("a settings symlink whose target is missing is left alone: exit 1, link and target unchanged, no extension", () => {
+    const dir = guardDir();
+    const home = homeWith(null);
+    const target = join(temp("chief-dotfiles-"), "settings.json");
+    mkdirSync(join(home, ".claude"));
+    symlinkSync(target, settingsPath(home));
+    expect(install(dir, home).status).toBe(1);
+    expect(lstatSync(settingsPath(home)).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(settingsPath(home))).toBe(target);
+    expect(existsSync(target)).toBe(false);
+    expect(existsSync(extPath(home))).toBe(false);
   });
 
   test.each([["invalid JSON", "{ nope"], ["a JSON list", "[]"], ["a hooks value that is not an object", '{"hooks":[]}']])("%s: the settings file is left untouched, exit 1, no backup, no extension", (_name, text) => {
