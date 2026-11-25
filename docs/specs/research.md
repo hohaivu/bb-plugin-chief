@@ -149,7 +149,9 @@ AskUserQuestion comes from Claude Code natively. Elsewhere, bb's builtin ask-use
 
 - The spawn goes through `managedSpawn.prepare` with role `researcher`. Reason: the researcher uses the same model path as a worker.
 - A target that cools down refuses the call before any spawn. Reason: a spawn on a cooling model would fail.
-- A preflight block refuses the call. The message names the blocked provider and asks for another pick or a retry after the reset. Reason: a provider that is not installed or is out of quota cannot run.
+- A provider with status `not_installed` refuses the call. The message names the provider and asks for another pick. Reason: a provider that is not installed cannot run.
+- A usage window at 100% does not refuse the call. The researcher starts, and BB logs a warning that names the window, the percent and the reset time. Reason: the usage reading describes one account, and the owner may have switched the default account.
+- An `unauthenticated` or `expired` status does not refuse the call. BB logs a warning and the researcher starts. Reason: a pooled or proxied host can still serve the provider.
 - A refused call does not freshen Chief's checkout. Reason: a refusal leaves the checkout as it was.
 
 ### Researcher rows
