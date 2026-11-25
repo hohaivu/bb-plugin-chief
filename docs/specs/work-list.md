@@ -7,6 +7,7 @@ The work list is the one place where a Chief reads what is pending: the Pending 
 | Term | Meaning |
 | --- | --- |
 | Pending block | The "Pending:" lines of `chief_roster`: threads with a next action, then open todos. |
+| Missing-Report line | The Pending line for a managed thread whose current turn ended idle without a `chief_report`. |
 | Todo | A row of the `chief_todos` table. A Chief adds it with `chief_roster`'s `todo` parameter. |
 | Active Chief | A Chief row whose state is not `complete`, `archived` or `deleted` (`isActiveChief`). |
 | Sweep | The pass that completes absorbed supporting rows (`sweep`, `completeAbsorbed`). |
@@ -120,11 +121,41 @@ A Chief's decisions file lists its own open todos that wait on an `after:` condi
 - The Pending block does not change. The after-section is a second output of the same todos.
 - `handOver` also copies the predecessor's decisions file to the successor. The copied after-section is rebuilt from the successor's own todos on the copy's write.
 
+## Missing-Report line
+
+A managed thread can end its turn while idle, without a `chief_report`. The Missing-Report line tells Chief that this happened. It appears in the Pending block of `chief_roster`, so Chief reads it on each roster read until the condition ends. This line is the one change to the Pending block. The contracts above that compare the Pending block with base exclude it.
+
+### One answer: `turnMissingReport`
+
+`turnMissingReport` in `src/runtime/lifecycle.ts` answers whether the current turn still lacks a Report. It returns true when all these conditions hold:
+
+- The row is not a Chief.
+- The row has a Chief (`chief_thread_id` is set).
+- The row state is `idle`.
+- The alert outbox has no `report:<active_cycle>:` key for the row.
+
+A `chief_report` writes a `report:<active_cycle>:` key for a row with a Chief. The key covers `active` reports too. Delivered outbox rows stay, so the answer stays the same on each read. The Missing-Report line, the `noreport` alert and its retry check all use this answer.
+
+### Pending line
+
+- A row with `turnMissingReport` true gets a recovery line from `nextAction` (`src/runtime/nextAction.ts`). `pendingLines` (`src/runtime/roster.ts`) prints that line in the Pending block.
+- The line tells Chief to inspect the thread, then continue it to ask for its `chief_report`, or decide itself.
+- The line stays on each read until the row reports or starts a new turn. Reason: The alert notifies Chief once. The Pending block must show open work until the cause ends.
+- A row with an earlier role-specific line shows that line, not the Missing-Report line. Reason: A role-specific line holds the recovery step for its own role.
+- A row that reported shows no Missing-Report line. This covers `ready`, `blocked`, `complete` and an `active` report in the same cycle. Reason: An idle row that reported is not stuck.
+
+### Alert
+
+- The `idle` event sends the `noreport:<cycle>` alert when `turnMissingReport` is true. Reason: The check needs the saved state, not the earlier state.
+- `stillDue` in `src/runtime/alerts.ts` keeps a `noreport` retry due only while `turnMissingReport` is true for the same cycle. Reason: A retry must stop when its cause ends.
+- Each cycle gets at most one `noreport` alert, because the outbox key dedupes it. Reading `chief_roster` sends no alert. Reason: The alert belongs to the end of a turn, not to a read.
+
 ## Entry points
 
 | Item | Code |
 | --- | --- |
 | Roster Pending block | `server.ts`: `pendingBlock`, `pendingLines`, `todoLines`, `clipPendingBlock` |
+| Missing-Report line | `src/runtime/lifecycle.ts`: `turnMissingReport`. `src/runtime/nextAction.ts`: `nextAction`. `src/runtime/alerts.ts`: `stillDue` |
 | Decisions after-section | `src/runtime/decisions.ts`: `writeDecisions`. `src/tools/roster.ts` calls it for a todo-only change. |
 | Todo storage | `server.ts`: `chief_todos`, `todosForProject`, `closedTodosForProject` |
 | Chief to another Chief | `server.ts`: `handOver` |
