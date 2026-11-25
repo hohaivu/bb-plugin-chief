@@ -248,6 +248,16 @@ describe("chief_research", () => {
       expect(callRows(state).map((row) => row.outcome)).toEqual(["error", "spawned", "spawned", "spawned", "spawned", "spawned"]);
     });
 
+    test("a full window with a null resetsAt still starts and warns without a reset time", async () => {
+      const state = await setup({ usageLimits: () => ({ codex: { status: "ok", windows: [{ label: "5h", usedPercent: 100, resetsAt: null }] } }) });
+      await setResearcherPick(state);
+      await call(state, await roleThread(state, "chief"), ask());
+      expect(researcherSpawn(state)).toBeDefined();
+      const warning = state.harness.logEntries.find((entry) => entry.level === "warn" && entry.message.includes("5h") && entry.message.includes("100%"));
+      expect(warning).toBeDefined();
+      expect(warning?.message).not.toContain("null");
+    });
+
     test.each([
       ["throws synchronously", { usageLimits: () => { throw new Error("rpc down"); } }],
       ["is absent on an older host", {}],
