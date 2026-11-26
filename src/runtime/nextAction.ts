@@ -162,7 +162,15 @@ export function createNextAction(ctx: Ctx) {
         // An implementation-lane Spec Writer that replaced a target completes on this pass too.
         const writers = store.all().filter((other) => other.role === "worker" && isWriter(other.kind) && !schedule.sideLane(other) && !terminal(other.state)
           && ledger.taskChain(other.thread_id).some((id) => ids.includes(id))).map((other) => other.thread_id);
-        return `The review gate passed. Complete ${ids.length > 1 ? "each target" : "it"}: ${[...ids.filter((id) => store.get(id)?.state !== "complete"), ...writers].map((id) => `chief_complete (threadId: ${id})`).join("; ")}; each marks its pull request ready.`;
+        const completes = [...ids.filter((id) => store.get(id)?.state !== "complete"), ...writers].map((id) => `chief_complete (threadId: ${id})`).join("; ");
+        // The advisory re-review asked for changes: they do not reopen the passed gate. Advisory means the reviewer launched after the fix run
+        // (a replacement initial reviewer predates it and keeps the plain line). The chat-fix call needs the fix run's open PR; a branch-only gate has none.
+        const fixer = store.get(gate.fixer_thread_id ?? "");
+        if (fixer && reviewer?.verdict === "request_changes" && reviewer.created_at > fixer.created_at) {
+          const chat = fixer.pr_url ? ` Optional, after completing, only while its pull request is open and unmerged: chief_delegate (replaces: ${fixer.thread_id}, kind: worker) with the findings${ids.length > 1 ? "; for another target's findings use replaces: that target, one of the ids above" : ""}.` : "";
+          return `The review gate passed on fix run ${fixer.thread_id}. ${verdictRef}, the advisory re-review, requested changes: advisory, they reopen nothing. Next: ${completes}.${chat}`;
+        }
+        return `The review gate passed. Complete ${ids.length > 1 ? "each target" : "it"}: ${completes}; each marks its pull request ready.`;
       }
     }
   }
