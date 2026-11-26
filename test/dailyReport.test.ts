@@ -140,7 +140,8 @@ describe("daily report: lessons", () => {
     const proposed = lesson("Keep briefs short.", "proposed", null);
     lesson("Name the verify command.", "accepted", Date.now() - DAY);
     const report = await readFile((await world.run()).path!, "utf8");
-    expect(report).toContain(`- #${proposed}: Keep briefs short.`);
+    const lessons = report.split(/^## /m).find((section) => section.startsWith("Lessons\n")); // up to the next level-two heading
+    expect(lessons).toContain(`- #${proposed}: Keep briefs short.`);
     expect(report).not.toContain("pass rate");
     for (const title of ["Score trend", "Calibration", "Communication", "Failed threads"]) expect(report).not.toMatch(new RegExp(`^## ${title}`, "m"));
   });
