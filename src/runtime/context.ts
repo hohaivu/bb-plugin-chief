@@ -20,7 +20,6 @@ import type { createResearchWiring } from "./researchWiring";
 import type { createToolRegistry } from "../tools/register";
 import type { createObserve } from "../observe/events";
 import type { createCompletionSnapshot } from "../observe/completionSnapshot";
-import type { createRetro } from "../observe/retro";
 
 /** Mutable state the plugin closure kept in `let`s and Maps. One object per plugin invocation: read and write it as ctx.state.x, never through a copy. */
 export interface State {
@@ -35,7 +34,6 @@ export interface State {
   sweeping: Promise<void> | null;
   /** A sweep requested while a flight ran: `independent` when a caller without a signal asked, else the last abandonable tick's signal. */
   sweepAgain: { independent: boolean; signal?: AbortSignal } | null;
-  retroing: Promise<void> | null;
   sectionEnsuring: Promise<string> | null;
   chiefStarts: Map<string, Promise<{ threadId: string; created: boolean }>>;
   // ponytail: one delegation at a time, so a second call on the same branch sees the first
@@ -56,7 +54,6 @@ export const createState = (): State => ({
   alertDeliveries: new Map(),
   sweeping: null,
   sweepAgain: null,
-  retroing: null,
   sectionEnsuring: null,
   chiefStarts: new Map(),
   delegating: Promise.resolve(),
@@ -242,9 +239,6 @@ export interface Ctx {
   noteCooldown: ReturnType<typeof createInspect>["noteCooldown"];
   recordedCommands: ReturnType<typeof createInspect>["recordedCommands"];
   research: ReturnType<typeof createResearchWiring>["research"];
-  runWorkflowCli: ReturnType<typeof createResearchWiring>["runWorkflowCli"];
-  retroTick: ReturnType<typeof createRetro>["retroTick"];
-  collectRetroBundle: ReturnType<typeof createRetro>["collectRetroBundle"];
   registerChiefTool: ReturnType<typeof createToolRegistry>["registerChiefTool"];
   touchCallerChief: ReturnType<typeof createToolRegistry>["touchCallerChief"];
 }

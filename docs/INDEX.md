@@ -13,7 +13,7 @@
 | Coordinator | [coordinator.md](specs/coordinator.md) | `src/tools/coordinate.ts` (`chief_coordinate`), `src/tools/attach.ts` (`chief_attach`), `src/tools/spawn.ts` (`chief_spawn`), `src/tools/escalate.ts` (`chief_escalate`), `src/tools/roster.ts`, `src/runtime/chiefs.ts` (`handOver`), `src/runtime/cli.ts` (adopt), `src/runtime/sweep.ts` (sweep), `src/runtime/lifecycle.ts`, `src/runtime/exec.ts` (`bounded`), `src/runtime/host.ts` (`bb.agents.configure`), `src/runtime/alerts.ts` (`alertCoordinator`, `deliverAlert`), `src/runtime/core.ts` (`pendingAlerts`, `retryDue`), `src/db/threadStore.ts`, `src/forge/forge.ts` (`prMerged`), `src/runtime/settings.ts` (`projectHostId`) | A Chief upgraded one way to supervise child Chiefs in any project; it wakes on a child's Need you, done, failure, end or stall. |
 | Tracker | [tracker.md](specs/tracker.md) | `src/tracker/tracker.ts`, `src/tracker/trackerSync.ts`, `src/tracker/trackerBbTasks.ts`, `src/runtime/core.ts` (settings `tracker`/`trackerProjects`), `src/runtime/delegation.ts` (`startPlan`, `startWorker`), `src/tools/escalate.ts` (`chief_escalate`), `src/runtime/lifecycle.ts` (supervisor), `src/report/reportIntake.ts` (`trackFiles`) | Optional mirror of Chief work to a task tracker behind a replaceable protocol; owner answers reach Chief once through the plugin. |
 | Decisions file | [decisions-file.md](specs/decisions-file.md) | `src/runtime/decisions.ts` (`writeDecisions`, `recordDecision`, `copyDecisions`), `src/tools/roster.ts` (`chief_roster` `decision` field), `src/runtime/chiefs.ts` (`handOver`), `src/tools/spawn.ts` (`chief_spawn`), `src/tracker/trackerSync.ts` (`pollAnswers`), `src/runtime/forgeWiring.ts` (`recordAnswer`), `src/runtime/artifacts.ts` (`readStorageFileIfPresent`) | Server-written decisions.md per Chief and Coordinator: owner answers, relays, sequencing agreements and todo after: reasons, re-read after compaction. |
-| Observability | [observability.md](specs/observability.md) | `src/observe/events.ts` (`createObserve`), `src/observe/sentry.ts`, `src/observe/scrub.ts`, `src/observe/sources.ts`, `src/observe/report.ts`, `src/observe/agyHistory.ts`, `src/observe/completionSnapshot.ts`, `src/observe/retro.ts`, `src/observe/rubrics.ts`, `src/research/workflowCli.ts`, `src/runtime/artifacts.ts` (`persistBrief`, `resumeBriefs`, `atomicWrite`), `src/runtime/host.ts` (`newestLessons`), `src/runtime/cli.ts` (`lesson`), `src/tools/register.ts` (`registerChiefTool`), `src/runtime/alerts.ts` (`recordFailure`) | One local event ledger, durable completion evidence, a daily report, a retro that scores finished plans and proposes gated lessons, and an optional scrubbed Sentry mirror. |
+| Observability | [observability.md](specs/observability.md) | `src/observe/events.ts` (`createObserve`), `src/observe/sentry.ts`, `src/observe/scrub.ts`, `src/observe/sources.ts`, `src/observe/report.ts`, `src/observe/agyHistory.ts`, `src/observe/completionSnapshot.ts`, `src/runtime/artifacts.ts` (`persistBrief`, `resumeBriefs`, `atomicWrite`), `src/runtime/host.ts` (`newestLessons`), `src/runtime/cli.ts` (`lesson`), `src/tools/register.ts` (`registerChiefTool`), `src/runtime/alerts.ts` (`recordFailure`) | One local event ledger, durable completion evidence, a daily report, gated lessons, and an optional scrubbed Sentry mirror. |
 
 ## Active decisions
 
@@ -35,7 +35,6 @@
 - [Stacked chains use a stackOn field](decisions/2026-11-14-stacked-chains-stackon.md)
 - [Owner answers reach a child through a marked relay](decisions/2026-11-16-owner-answer-relay-marker.md)
 - [Researcher is a normal agent with a role model](decisions/2026-11-17-researcher-normal-agent.md)
-- [The retro judge uses the research helper pick first](decisions/2026-11-25-retro-judge-helper-pick.md)
 - [Heavy commands run through a host slot wrapper](decisions/2026-11-18-heavy-slots-host-capacity.md)
 - [Design discussion runs in the researcher thread](decisions/2026-11-18-crispy-design-discussion.md)
 - [Advisor review is opt-in at Chief's discretion](decisions/2026-11-18-advisor-review-opt-in.md)
@@ -45,6 +44,7 @@
 - [Horizontal block waves may waive tests](decisions/2026-11-24-horizontal-block-test-waiver.md)
 - [Planner owns the plan outcome](decisions/2026-11-25-planner-owns-plan-outcome.md)
 - [Command guard runs in provider hooks, scoped by marker files](decisions/2026-11-25-command-guard-provider-hooks.md)
+- [Remove the retro judge](decisions/2026-11-26-remove-retro-judge.md)
 
 ## Superseded decisions
 
@@ -52,3 +52,4 @@
 - [Retest after a fix round gates the review](decisions/2026-11-10-retest-after-fix-round.md)
 - [Evidence-only retest needs a complete receipt](decisions/2026-11-18-evidence-retest-needs-complete-receipt.md)
 - [Brief rules live in role skills](decisions/2026-11-13-brief-rules-in-role-skills.md)
+- [The retro judge uses the research helper pick first](decisions/2026-11-25-retro-judge-helper-pick.md) (superseded by [Remove the retro judge](decisions/2026-11-26-remove-retro-judge.md))

@@ -96,7 +96,7 @@ const THREAD_EVENT_TYPES = ["provider/error", "system/error", "provider/warning"
 export type LooseEvent = { type: string; seq: number | string; createdAt: number; data: Record<string, any> };
 
 export const EVENT_PAGE = 100;
-/** The one way the report and the retro read a thread's events: a single bounded events.list call. */
+/** The one way the report reads a thread's events: a single bounded events.list call. */
 export const listEvents = (bb: Ctx["bb"], threadId: string, types: readonly string[], query: Record<string, string> = {}) =>
   bounded(() => bb.sdk.threads.events.list({ threadId, types: [...types], ...query } as never), 15_000) as unknown as Promise<LooseEvent[]>;
 
@@ -320,10 +320,6 @@ async function fetchIssues(ctx: Ctx, query: string): Promise<SentryIssue[] | nul
     firstSeen: String(issue.firstSeen ?? ""), lastSeen: String(issue.lastSeen ?? ""), permalink: String(issue.permalink ?? ""), shortId: String(issue.shortId ?? ""),
   }));
 }
-
-/** Unresolved issues seen in the last `days` days that carry tag=value, or null when the Sentry settings are unset. The retro reads it. */
-export const sentryIssuesForTag = (ctx: Ctx, tag: string, value: string, days: number) =>
-  fetchIssues(ctx, `is:unresolved ${tag}:"${value.replace(/"/g, "")}" lastSeen:-${Math.max(1, Math.floor(days))}d`);
 
 const sentry: Adapter = async (env) => {
   const issues = await fetchIssues(env.ctx, "is:unresolved lastSeen:-24h");

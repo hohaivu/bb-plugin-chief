@@ -34,7 +34,6 @@ The research domain lets Chief start a read-only researcher thread for one ticke
 | `modelConfiguration`, `setRoleModel` | `src/runtime/host.ts` | Read and write the researcher pick. `modelConfiguration` has no Tester role, and a stored tester row is never read. |
 | `researchChiefInstructions`, `bb.agents.configure` | `src/runtime/host.ts` | Give Chief the research tool and its instruction. |
 | `chief_models_v9` | `src/db/migrations.ts` | Stores the researcher pick and seeds it once. |
-| `judgeModel` | `src/observe/retro.ts` | Reads the research helper pick, then the researcher pick, for the retro judge. |
 | `bindDesign` | `src/runtime/delegation.ts` | Creates missing snapshots or reuses existing ones for a new `chief_plan` binding. |
 | `approvedDesign` | `src/runtime/delegation.ts` | Reads the exact bound snapshot pair for revision and `chief_forge_init`. It never creates snapshots or reads live `design.md`. |
 
@@ -171,7 +170,6 @@ AskUserQuestion comes from Claude Code natively. Elsewhere, bb's builtin ask-use
 - `researcher` is a role of `chief_models`. Settings → Chief models by machine edits it with the same picker as Worker. Reason: each role has one model control.
 - `setRoleModel({ role: "researcher", selection })` stores a pick. `selection: null` clears it, and a later start does not re-import it. Reason: the seed runs once, in the migration.
 - At runtime, no code path falls back to Chief's model, Worker's model or a research-mode pick. Reason: each role has one model source.
-- The retro judge (`judgeModel`) reads the `research-helper` pick first. When that pick is unset or unusable, it reads the researcher pick. When both are unusable, it uses the BB default. Reason: judging is log reading against a fixed rubric, so the cheaper helper pick runs it when set. See [Retro judge model](../decisions/2026-11-25-retro-judge-helper-pick.md).
 
 ### Helper threads
 
@@ -202,7 +200,7 @@ AskUserQuestion comes from Claude Code natively. Elsewhere, bb's builtin ask-use
 
 ### Removed mechanisms
 
-- No BB workflow runs research. Only `src/observe/retro.ts` calls `runWorkflowCli`. Reason: the researcher decides its own work.
+- No BB workflow runs research. Reason: the researcher decides its own work.
 - No agent-call cap, per-mode timeout, server hard stop or unreported-run alert exists. Reason: the stall alert and `chief_stop` replace them.
 - A researcher that waits on helpers stays active. A long run can raise the stall alert. Reason: intended, because the stall alert replaces the hard timeout.
 
@@ -275,7 +273,7 @@ Old researcher briefs ask the researcher to call `chief_research` with `mode` an
    ```sql
    SELECT DISTINCT run_id FROM chief_research_calls WHERE run_id IS NOT NULL AND started_at > (strftime('%s','now')-7200)*1000
    ```
-   Match the ids against `bb workflows list --json` in that project. Never touch a run whose id is not in that list, because retro runs are workflows too.
+   Match the ids against `bb workflows list --json` in that project. Never touch a run whose id is not in that list.
 2. For each match, run `bb workflows status <run-id>`. If it is not terminal, wait for the researcher to report, or run `bb workflows stop <run-id>` and check the status again. If the status cannot be read or the stop is not confirmed, list the run id in the hand-off to the user. Do not block the merge on it.
 3. For each non-terminal managed researcher row in `chief_roster`, let it report or run `chief_stop`. Never run `chief_continue` on an old researcher after the reload. Ask again with a fresh `chief_research` call.
 4. Planners mid-flight need no action. After the reload, their `chief_research` call is refused, and the refusal names helper threads.

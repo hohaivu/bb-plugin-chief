@@ -1,6 +1,5 @@
 import { clip } from "../core/text";
 import type { Ctx } from "../runtime/context";
-import { aggregate, applicableRubrics, curve, FAIL_BELOW, INSUFFICIENT, NOT_APPLICABLE, RUBRIC_VERSION } from "./rubrics";
 import { normalize, scrub } from "./scrub";
 import { ACTIVITY_KINDS, ADAPTERS, type Adapter, collectSources, configuredSecrets, type Item, type Section } from "./sources";
 
@@ -12,12 +11,6 @@ const TRIAGE = "Triage: read the report, then plan any fix as normal work (chief
 interface Block { title: string; lines: string[]; cut: number }
 export interface DailyCounts { newSentry: number; patterns: number; blocked: number; stalls: number; reviewRounds: number; proposedLessons: number }
 
-/** thread -> whether any scored dimension failed. */
-const failedByThread = (rows: { thread_id: string; score: number | null }[]) => {
-  const failed = new Map<string, boolean>();
-  for (const row of rows) if (row.score !== null) failed.set(row.thread_id, (failed.get(row.thread_id) ?? false) || row.score < FAIL_BELOW);
-  return failed;
-};
 const pad = (value: number) => String(value).padStart(2, "0");
 /** The server-local date, the one the 08:00 schedule runs on. */
 export const localDate = (at: number) => { const d = new Date(at); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
@@ -88,84 +81,15 @@ export async function buildDailyReport(ctx: Ctx, since: number, until: number, a
     return `- ${threadId}${row ? ` ${row.role} “${clip(row.title, 80)}”` : ""}: ${[...kindsOf].map(([kind, n]) => `${kind}×${n}`).join(", ")}`;
   }));
 
-  // ---- retro sections: scores are never averaged across rubric_version ----
-  interface ScoreRow { thread_id: string; plan_thread_id: string; role: string; scorer: string; rubric_version: string; label: string; score: number | null; reason: string; at: number; detail: string | null }
-  const scores = db.prepare(`SELECT * FROM chief_scores WHERE at >= ? AND at < ?`).all(until - 28 * DAY_MS, until) as ScoreRow[];
-  const week = (at: number) => { // ISO week of the UTC date
-    const d = new Date(Date.UTC(new Date(at).getUTCFullYear(), new Date(at).getUTCMonth(), new Date(at).getUTCDate()));
-    d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
-    return `${d.getUTCFullYear()}-W${pad(Math.ceil(((d.getTime() - Date.UTC(d.getUTCFullYear(), 0, 1)) / DAY_MS + 1) / 7))}`;
-  };
-  const groups = new Map<string, ScoreRow[]>();
-  for (const row of scores) if (row.label !== NOT_APPLICABLE) {
-    const key = `${row.rubric_version}\u0000${week(row.at)}\u0000${row.scorer}`;
-    groups.set(key, [...(groups.get(key) ?? []), row]);
-  }
-  block("Score trend (last 4 ISO weeks, per rubric version)", scores.length ? ["| rubric version | week | scorer | raw mean | curve(mean) | n | pass | fail | insufficient |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-    ...[...groups].sort(([a], [b]) => a.localeCompare(b)).map(([key, rows]) => {
-      const [version, wk, scorer] = key.split("\u0000");
-      const scored = rows.filter((row) => row.score !== null);
-      const mean = scored.length ? scored.reduce((total, row) => total + row.score!, 0) / scored.length : null;
-      return `| ${version} | ${wk} | ${scorer} | ${mean === null ? "-" : mean.toFixed(3)} | ${mean === null ? "-" : curve(mean).toFixed(3)} | ${scored.length} | ${scored.filter((row) => row.score! >= FAIL_BELOW).length} | ${scored.filter((row) => row.score! < FAIL_BELOW).length} | ${rows.filter((row) => row.label === INSUFFICIENT).length} |`;
-    })] : []);
-
-  const comm = scores.filter((row) => row.scorer === "communication" && row.at >= until - 7 * DAY_MS);
-  const details = comm.map((row) => { try { return JSON.parse(row.detail ?? "null") as { observed?: Record<string, number | null>; signals?: Record<string, boolean | null> } | null; } catch { return null; } });
-  const sumObserved = (name: string) => details.reduce((sum, detail) => sum + (detail?.observed?.[name] ?? 0), 0);
-  const mean = (name: string) => { const values = details.map((detail) => detail?.observed?.[name]).filter((value): value is number => typeof value === "number"); return values.length ? Math.round(values.reduce((a, b) => a + b, 0) / values.length) : "-"; };
-  const signalCount = (name: string) => details.filter((detail) => detail?.signals?.[name] === true).length;
-  block("Communication (7 days)", comm.length ? [`${comm.length} handoffs judged: ${comm.filter((row) => row.label === INSUFFICIENT).length} insufficient evidence.`,
-    `Observed by the plugin: nudges ${sumObserved("nudges")}, blocks ${sumObserved("blocks")}, review rounds ${sumObserved("reviewRounds")}, mean brief ${mean("briefChars")} chars, mean ~${mean("estTokens")} tokens (estimate).`,
-    `Attributed by the judge (not observed): ${["briefGapBlock", "askedTwice", "unclearBriefRounds", "userWordsLost"].map((name) => `${name} ${signalCount(name)}`).join(", ")}.`] : []);
-
-  // Calibration: worker threads judged at the current version vs the first bound reviewer verdict. Communication is never calibrated.
-  const calibrationRows = new Map<string, { scorer: string; score: number | null; label: string }[]>();
-  for (const entry of scores) if (entry.role === "worker" && entry.rubric_version === RUBRIC_VERSION && entry.scorer !== "communication") calibrationRows.set(entry.thread_id, [...(calibrationRows.get(entry.thread_id) ?? []), entry]);
-  // Each worker's status is aggregate's over its applicable rubrics: a missing or insufficient dimension is insufficient, never pass.
-  const judged = new Map([...calibrationRows].map(([threadId, rows]) => [threadId, aggregate(rows, applicableRubrics(store.get(threadId)?.kind).filter((name) => name !== "communication")).status]));
-  const insufficientWorkers = [...judged.values()].filter((status) => status === "insufficient").length;
-  const matrixSize = judged.size - insufficientWorkers;
-  const matrix = { pass: { approve: 0, request_changes: 0 }, fail: { approve: 0, request_changes: 0 } };
-  let bound = 0, unbound = 0;
-  for (const [threadId, status] of judged) {
-    if (status === "insufficient") continue;
-    const verdicts = db.prepare(`SELECT verdict, head_sha, worker_report_seq FROM reviewer_verdicts WHERE worker_thread_id=? ORDER BY id`).all(threadId) as { verdict: "approve" | "request_changes"; head_sha: string | null; worker_report_seq: number | null }[];
-    const first = verdicts.find((verdict) => verdict.head_sha !== null && verdict.worker_report_seq !== null);
-    if (!first) { if (verdicts.length) unbound += 1; continue; }
-    bound += 1;
-    matrix[status][first.verdict] += 1;
-  }
-  const disagree = matrix.pass.request_changes + matrix.fail.approve;
-  block("Calibration (judge vs first reviewer verdict, workers, non-communication)", judged.size ? [
-    `${matrixSize} workers judged at ${RUBRIC_VERSION}; ${bound} with a bound verdict (coverage ${matrixSize ? Math.round(100 * bound / matrixSize) : 0}%); ${unbound} unbound (null head_sha or worker_report_seq) excluded; ${insufficientWorkers} insufficient, outside the matrix.`,
-    ...(bound < 10 ? [`insufficient evidence (n=${bound})`] : [
-      "| judge \\ first verdict | approve | request_changes |", "| --- | --- | --- |",
-      `| pass | ${matrix.pass.approve} | ${matrix.pass.request_changes} |`, `| fail | ${matrix.fail.approve} | ${matrix.fail.request_changes} |`,
-      `Disagreement rate ${Math.round(100 * disagree / bound)}% (${disagree}/${bound}).`]),
-  ] : []);
-
-  const failed24 = scores.filter((row) => row.at >= until - DAY_MS && row.score !== null && row.score < FAIL_BELOW && row.scorer !== "communication");
-  block("Failed threads (24 h)", failed24.map((row) => `- ${row.thread_id} ${row.role}: ${row.scorer} ${row.label} (${row.score}) — ${clip(row.reason.replace(/\s+/g, " "), 300)}`));
-
   interface LessonRow { id: number; status: string; surface: string | null; text: string; plan_thread_id: string | null; at: number; decided_at: number | null }
   const lessons = db.prepare(`SELECT id, status, surface, text, plan_thread_id, at, decided_at FROM chief_lessons WHERE surface IS NOT NULL OR status != 'accepted'`).all() as LessonRow[];
   const proposed = lessons.filter((lesson) => lesson.status === "proposed");
   const recurringSurface = new Set([...new Set(proposed.map((lesson) => lesson.surface ?? "other"))].filter((surface) => new Set(proposed.filter((lesson) => (lesson.surface ?? "other") === surface && lesson.at >= until - 14 * DAY_MS && lesson.plan_thread_id).map((lesson) => lesson.plan_thread_id)).size >= 2));
-  const decided = db.prepare(`SELECT id, decided_at FROM chief_lessons WHERE status='accepted' AND decided_at >= ?`).all(until - 30 * DAY_MS) as { id: number; decided_at: number }[];
-  const passRate = (from: number, to: number) => {
-    const status = failedByThread(db.prepare(`SELECT thread_id, score FROM chief_scores WHERE at >= ? AND at < ? AND scorer != 'communication' AND score IS NOT NULL AND rubric_version=?`).all(from, to, RUBRIC_VERSION) as { thread_id: string; score: number }[]);
-    const n = status.size;
-    return { n, rate: n ? [...status.values()].filter((failedThread) => !failedThread).length / n : 0 };
-  };
   block("Lessons", [
-    `${proposed.length} proposed awaiting a decision (bb chief lessons --status proposed; accept or retire with a reason); ${lessons.filter((lesson) => lesson.status === "accepted").length} accepted, ${lessons.filter((lesson) => lesson.status === "retired").length} retired (retro and gated lessons).`,
+    `${proposed.length} proposed awaiting a decision (bb chief lessons --status proposed; accept or retire with a reason); ${lessons.filter((lesson) => lesson.status === "accepted").length} accepted, ${lessons.filter((lesson) => lesson.status === "retired").length} retired (gated lessons).`,
     ...[...new Set(proposed.map((lesson) => lesson.surface ?? "other"))].sort((a, b) => Number(recurringSurface.has(b)) - Number(recurringSurface.has(a)) || a.localeCompare(b)).flatMap((surface) => [
       `### ${surface}${recurringSurface.has(surface) ? " (recurring: 2+ plans in 14 days)" : ""}`,
       ...proposed.filter((lesson) => (lesson.surface ?? "other") === surface).map((lesson) => `- #${lesson.id}: ${clip(lesson.text.replace(/\s+/g, " "), 200)}`)]),
-    ...decided.map((lesson) => {
-      const beforeRate = passRate(lesson.decided_at - 14 * DAY_MS, lesson.decided_at), afterRate = passRate(lesson.decided_at, Math.min(until, lesson.decided_at + 14 * DAY_MS));
-      return `- accepted #${lesson.id}: pass rate before→after ${beforeRate.n < 5 || afterRate.n < 5 ? `too few (n<5; before n=${beforeRate.n}, after n=${afterRate.n})` : `${Math.round(100 * beforeRate.rate)}% (n=${beforeRate.n}) → ${Math.round(100 * afterRate.rate)}% (n=${afterRate.n})`}`;
-    }),
   ]);
   const proposedCount = proposed.length;
 

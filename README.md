@@ -199,7 +199,7 @@ you merge and reload, ask Chief to do this once for each project that used resea
 1. Find live research runs:
    `sqlite3 ~/.bb/chief/data.db "SELECT DISTINCT run_id FROM chief_research_calls WHERE run_id IS NOT NULL AND started_at > (strftime('%s','now')-7200)*1000"`.
    Match them against `bb workflows list --json` in that project. Never touch a run that is not in
-   that list (retro runs are workflows too).
+   that list.
 2. For each match, read `bb workflows status <run-id>`. If it is not terminal, wait for the
    researcher to report, or run `bb workflows stop <run-id>` and check `status` again. If the status
    cannot be read or the stop is not confirmed, stop the run from the Workflows view. This does not

@@ -11,7 +11,7 @@ export type AgyRead =
   | { status: "ok"; steps: AgyStep[] }
   | { status: "skipped" | "unavailable" | "missing"; note: string; steps: [] };
 
-/** How many of a conversation's newest steps the report and the retro read. */
+/** How many of a conversation's newest steps the report reads. */
 export const RECENT_STEPS = 2_000;
 export const agyDbPath = (providerThreadId: string) => join(homedir(), ".gemini", "antigravity-acp", "conversations", `${providerThreadId}.db`);
 /** agy step statuses 6 and 7 are failures. */
