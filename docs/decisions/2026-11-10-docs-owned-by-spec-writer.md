@@ -16,5 +16,5 @@ Rejected: a worker revert (it is itself a docs change, and history keeps the vio
 
 ## Consequence
 
-- A branch with legacy trailerless docs commits needs `chief_review` or `override` instead of `skipReview`.
-- The trailer is cooperative attribution. It is not a security boundary.
+- A branch with legacy trailerless docs commits needs `chief_review` or `override` instead of `skipReview`. The trailer is cooperative attribution, not a security boundary.
+- Planner routing of non-spec `docs/` deliverables is prompt-only. A plan check on `docs/` paths was rejected: plan text names those paths to read or forbid them.
