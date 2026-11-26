@@ -224,7 +224,8 @@ Secret settings have no default. The code handles an undefined value. The plugin
   4. Any other move error, or a failure of the second move, removes the tmp file and throws the error.
 - The code finds an existing destination by the text of the host message. When the host changes that text, an overwrite fails with an error and loses no data.
 - The replace is remove then move. A reader can see the file missing for a short time.
-- A failed second move loses the old version. The caller sees the error and retries.
+- A failed second move can lose the old version, and the write throws the error.
+- `persistBrief` retries only HTTP 409 provisioning errors. It logs any other error and settles that copy.
 
 ## Source adapters
 
@@ -288,7 +289,7 @@ Each adapter reads one evidence source and returns a section: `{name, status, no
 | Completion evidence | The completions in the window whose `diff_state` is not `ok`, with their notes. |
 | Recurring patterns | Patterns that occur 2 or more times. The top 15. |
 | Threads with failures | The threads that have the most failure items. |
-| Lessons | Proposed lessons that wait for a decision, grouped by surface; a surface with lessons from 2 or more distinct plans in 14 days is recurring and comes first. Then the counts of accepted and retired lessons. |
+| Lessons | The first line gives the count of proposed lessons, the count of accepted lessons that have a surface, and the count of retired lessons. Then the proposed lessons follow, grouped by surface. A surface is the lesson category. A proposal with no surface appears under `other`. A surface with proposed lessons from 2 or more distinct plans in 14 days is recurring and comes first. |
 | Logs | The items of the `bbLogs` adapter. |
 | Triage | A last line that tells Chief to plan any fix as normal work (`chief_plan`). |
 
@@ -318,6 +319,7 @@ Each adapter reads one evidence source and returns a section: `{name, status, no
 - The migration adds `status` with the default `accepted`. Existing rows stay accepted, so they keep their injection.
 - The migration also adds `surface`, `plan_thread_id`, `evidence`, `rubric_version`, `proposal_key`, `decided_at` and `decided_reason`. A unique index covers `proposal_key`. A NULL key is not constrained. Only older retro rows hold values in `surface`, `plan_thread_id`, `evidence`, `rubric_version` and `proposal_key`.
 - The report intake (`src/report/reportIntake.ts`) inserts a lesson as `proposed`. Its report alert adds the line `Proposed lesson <id>: bb chief lesson accept <id> --reason "…" (or retire)`.
+- The report intake sets the `role` of each new lesson to the role of the reviewer or advisor that submitted the report. Accept and retire do not change an existing lesson role.
 
 ### Injection (`newestLessons` in `src/runtime/host.ts`)
 
