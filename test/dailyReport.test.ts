@@ -13,7 +13,7 @@ afterEach(async () => { vi.unstubAllGlobals(); restoreEnv(); await disposeAll();
 
 // Contracts (docs/specs/observability.md, "Daily report"): one file and one self-alert per local date, no Chief means no report,
 // the ledger keeps 90 days, one adapter's failure never touches another section, Sentry issues split into new and recurring,
-// the report stays within 60,000 characters on whole items, and the calibration and lesson sections follow their evidence rules.
+// and the report stays within 60,000 characters on whole items.
 const DAY = 86_400_000;
 type State = Awaited<ReturnType<typeof setup>>;
 const issue = (n: number, firstSeen: string, title = `Error ${n}`) => ({ shortId: `CHIEF-${n}`, title, count: "7", level: "error", firstSeen, lastSeen: new Date().toISOString(), permalink: `https://sentry.example/${n}` });
@@ -132,72 +132,16 @@ describe("daily report: Sentry", () => {
   });
 });
 
-describe("daily report: retro sections", () => {
-  const RUBRIC = "2026-11-13.1";
-  // A worker's status is aggregate's over its applicable rubrics, so a judged worker carries all three non-communication scores (a fail is a low efficiency).
-  const score = (state: State, id: string, scorer: string, label: string, value: number | null) => state.db.prepare(`INSERT INTO chief_scores (thread_id, plan_thread_id, role, scorer, rubric_version, label, score, reason, at) VALUES (?, 'thr_plan', 'worker', ?, ?, ?, ?, 'because', ?)`).run(id, scorer, RUBRIC, label, value, Date.now() - 1_000);
-  const judgedWorker = (state: State, id: string, pass: boolean) => { score(state, id, "efficiency", "x", pass ? 0.9 : 0.1); score(state, id, "procedure-compliance", "x", 0.9); score(state, id, "verbosity", "x", 0.9); };
-  const verdict = (state: State, id: string, kind: string, bound: boolean) => state.db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at, head_sha, worker_report_seq) VALUES ('thr_rev', ?, ?, 1, ?, ?, ?)`).run(id, kind, Date.now(), bound ? "abc" : null, bound ? 1 : null);
-  const section = (report: string, title: string) => new RegExp(`## ${title.replace(/[()]/g, "\\$&")}[^\n]*\n([\\s\\S]*?)\n## `).exec(report)![1]!;
-
-  test("calibration: unbound verdicts are counted out and the 2×2 matrix and disagreement rate are exact", async () => {
+describe("daily report: lessons", () => {
+  test("lists a proposed lesson, with no pass-rate line and none of the retired score sections", async () => {
     const state = await setup();
     const world = await dailyWorld(state);
-    // pass: 4 approve + 2 request_changes; fail: 3 approve + 3 request_changes; two more judged workers have only unbound verdicts.
-    const plan: [boolean, string, number][] = [[true, "approve", 4], [true, "request_changes", 2], [false, "approve", 3], [false, "request_changes", 3]];
-    let n = 0;
-    for (const [pass, kind, count] of plan) for (let i = 0; i < count; i++) { const id = `thr_w${n++}`; judgedWorker(state, id, pass); verdict(state, id, kind, true); }
-    for (const id of ["thr_u1", "thr_u2"]) { judgedWorker(state, id, true); verdict(state, id, "approve", false); }
-    const calibration = section(await readFile((await world.run()).path!, "utf8"), "Calibration (judge vs first reviewer verdict, workers, non-communication)");
-    expect(calibration).toContain("14 workers judged");
-    expect(calibration).toContain("12 with a bound verdict (coverage 86%); 2 unbound");
-    expect(calibration).toContain("| pass | 4 | 2 |");
-    expect(calibration).toContain("| fail | 3 | 3 |");
-    expect(calibration).toContain("Disagreement rate 42% (5/12)");
-  });
-
-  test("calibration: nonfailing incomplete evidence is insufficient and outside the matrix; a fail with incomplete evidence stays a fail inside it", async () => {
-    const state = await setup();
-    const world = await dailyWorld(state);
-    for (let i = 0; i < 10; i++) { judgedWorker(state, `thr_ok${i}`, true); verdict(state, `thr_ok${i}`, "approve", true); }
-    // Nonfailing and incomplete: insufficient, whatever the reviewer said.
-    score(state, "thr_missing", "efficiency", "x", 1); // procedure-compliance and verbosity were never stored
-    verdict(state, "thr_missing", "request_changes", true);
-    score(state, "thr_null", "efficiency", "x", 1);
-    score(state, "thr_null", "procedure-compliance", "insufficient_evidence", null);
-    score(state, "thr_null", "verbosity", "insufficient_evidence", null);
-    verdict(state, "thr_null", "approve", true);
-    // A valid score below 0.5 fails the worker even though the other dimensions are missing or explicitly insufficient.
-    score(state, "thr_failmissing", "efficiency", "x", 0.4);
-    verdict(state, "thr_failmissing", "approve", true);
-    score(state, "thr_failnull", "efficiency", "x", 0.4);
-    score(state, "thr_failnull", "procedure-compliance", "insufficient_evidence", null);
-    score(state, "thr_failnull", "verbosity", "insufficient_evidence", null);
-    verdict(state, "thr_failnull", "request_changes", true);
-    const calibration = section(await readFile((await world.run()).path!, "utf8"), "Calibration (judge vs first reviewer verdict, workers, non-communication)");
-    expect(calibration).toContain("12 workers judged");
-    expect(calibration).toContain("12 with a bound verdict (coverage 100%); 0 unbound");
-    expect(calibration).toContain("2 insufficient, outside the matrix");
-    expect(calibration).toContain("| pass | 10 | 0 |");
-    expect(calibration).toContain("| fail | 1 | 1 |");
-    expect(calibration).toContain("Disagreement rate 8% (1/12)");
-  });
-
-  test("calibration with fewer than 10 bound verdicts says insufficient evidence and prints no matrix", async () => {
-    const state = await setup();
-    const world = await dailyWorld(state);
-    for (let i = 0; i < 3; i++) { judgedWorker(state, `thr_w${i}`, true); verdict(state, `thr_w${i}`, "approve", true); }
-    const calibration = section(await readFile((await world.run()).path!, "utf8"), "Calibration (judge vs first reviewer verdict, workers, non-communication)");
-    expect(calibration).toContain("insufficient evidence (n=3)");
-    expect(calibration).not.toContain("| pass |");
-  });
-
-  test("an accepted lesson with fewer than 5 judged threads on a side shows too few, never a rate", async () => {
-    const state = await setup();
-    const world = await dailyWorld(state);
-    state.db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, at, status, decided_at) VALUES ('proj_1', 'Keep briefs short.', 'thr_x', ?, 'accepted', ?)`).run(Date.now() - 2 * DAY, Date.now() - DAY);
-    const lessons = section(await readFile((await world.run()).path!, "utf8"), "Lessons");
-    expect(lessons).toMatch(/accepted #\d+: pass rate before→after too few \(n<5; before n=0, after n=0\)/);
-    expect(lessons).not.toMatch(/\d+% \(n=/);
+    const lesson = (text: string, status: string, decidedAt: number | null) => state.db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, at, status, decided_at) VALUES ('proj_1', ?, 'thr_x', ?, ?, ?)`).run(text, Date.now() - 2 * DAY, status, decidedAt).lastInsertRowid;
+    const proposed = lesson("Keep briefs short.", "proposed", null);
+    lesson("Name the verify command.", "accepted", Date.now() - DAY);
+    const report = await readFile((await world.run()).path!, "utf8");
+    expect(report).toContain(`- #${proposed}: Keep briefs short.`);
+    expect(report).not.toContain("pass rate");
+    for (const title of ["Score trend", "Calibration", "Communication", "Failed threads"]) expect(report).not.toMatch(new RegExp(`^## ${title}`, "m"));
   });
 });

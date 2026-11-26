@@ -1,9 +1,6 @@
 import { createResearch } from "../research/research";
-import { createWorkflowCli } from "../research/workflowCli";
 import { terminal } from "../types";
 import { clip } from "../core/text";
-import { serverPath } from "../forge/forge";
-import { execFileAsync } from "./exec";
 import { MAX_RESULT_LENGTH } from "./constants";
 import type { Ctx } from "./context";
 
@@ -17,6 +14,5 @@ export function createResearchWiring(ctx: Ctx) {
     freshenCheckout: (chief) => ctx.freshenChiefCheckout(chief, "researcher"), projectHost: ctx.projectHost, projectHostId: ctx.projectHostId,
     clip, maxResultLength: MAX_RESULT_LENGTH,
   });
-  const runWorkflowCli = createWorkflowCli({ serverPath, execFileAsync });
-  return { research, runWorkflowCli };
+  return { research };
 }

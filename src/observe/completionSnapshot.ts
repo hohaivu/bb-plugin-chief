@@ -9,7 +9,7 @@ export const MAX_DIFF_CHARS = 500_000;
 const DEADLINE_MS = 30_000;
 
 /** Durable completion evidence for one worker: its pull request, base and head, the final diff (or why there is none) and the brief.
- * Taken before the completion write that queues cleanup, so cleanup can never clear what wave 3 grades from. */
+ * Taken before the completion write that queues cleanup, so cleanup can never clear the evidence. */
 export function createCompletionSnapshot(ctx: Ctx) {
   const { bb, db } = ctx;
 
