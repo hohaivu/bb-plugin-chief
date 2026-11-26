@@ -40,6 +40,9 @@ test("a ready fix permits one advisory re-review even if it also requests change
   const { worker, reviewer } = await inFix(world);
   const fix = await world.delegateTo({ replaces: worker.threadId, kind: "worker" });
   await world.ready(fix.threadId);
+  const plain = String(await world.call("chief_roster", {}));
+  expect(plain).toContain(`chief_complete (threadId: ${worker.threadId})`);
+  expect(plain).not.toContain(`chief_delegate (replaces: ${fix.threadId}`);
   await world.open(worker.threadId);
   const second = world.gate().reviewer_thread_id;
   expect(second).not.toBe(reviewer);
@@ -48,6 +51,9 @@ test("a ready fix permits one advisory re-review even if it also requests change
   expect(world.gate().reviewer_thread_id).toBe(second);
   await world.verdict(second, "request_changes");
   world.setIdle(second);
+  const advisory = String(await world.call("chief_roster", {}));
+  expect(advisory).toContain(`chief_complete (threadId: ${worker.threadId})`);
+  expect(advisory).toContain(`chief_delegate (replaces: ${fix.threadId}, kind: worker)`);
   await world.call("chief_review", { workerThreadId: worker.threadId }); // the finished advisory reviewer starts nothing
   expect(world.gate().reviewer_thread_id).toBe(second);
   await world.complete(worker.threadId);
