@@ -2,7 +2,7 @@
 
 Observability gives Chief one local ledger for failures, review outcomes and nudges. It can also mirror the failure and review events to Sentry as scrubbed metadata. With no DSN configured, Chief makes no network call and the ledger still records.
 
-Observability also keeps durable completion evidence, writes a daily report of failures, and grades each finished plan in a retro. The retro can propose lessons. Only a lesson that Chief accepts reaches a prompt.
+Observability also keeps durable completion evidence and writes a daily report of failures. Reviewers and advisors can propose lessons. Only a lesson that Chief accepts reaches a prompt.
 
 ## Terms
 
@@ -11,10 +11,6 @@ Observability also keeps durable completion evidence, writes a daily report of f
 | Ledger | The table `chief_events`. One row is one event. |
 | Source adapter | A read-only reader of one evidence source. It returns one section of the daily report. |
 | Completion snapshot | The row in `chief_completions` and the artifact `completion.diff`. Chief writes both when a worker completes. |
-| Retro | The graded review of one finished plan. One row of `chief_retros` is one retro. |
-| Judge | The read-only workflow `chief-retro-judge`. It scores threads and handoffs against rubrics. |
-| Rubric | A scoring rule. It has labels, and each label has a score. |
-| Handoff | One delegation from Chief to a child thread, with the messages it caused. |
 | Lesson | A rule in `chief_lessons`. Its status is `proposed`, `accepted` or `retired`. |
 | Event | One row with a `kind`, the thread, role and project tags, and an optional short `detail`. |
 | DSN | The Sentry project address, from the setting `sentryDsn`. It holds a public key, a host and a project id. |
@@ -216,11 +212,19 @@ Secret settings have no default. The code handles an undefined value. The plugin
   Reason: BB starts services only after the old generation is disposed. A replay in the plugin factory could miss a row that the old generation writes late, or the old generation could delete a row that the replay reads.
 - Trade-off: the outbox replays after activation instead of flushing on dispose. Dispose cannot wait about 60 s, and the bb handle is stale after dispose. A replay rewrites an existing copy with the same content. `atomicWrite` is remove-then-move, not a concurrency fence, so generations avoid overlap by ordering, not locking.
 - The Chief artifact copy goes to the host of the project (`projectHostId`). It does not ask bb for the storage location of the thread.
-  Reason: the storage location is unavailable while the environment provisions, and the retro reads this copy, so it must not depend on that call.
+  Reason: the storage location is unavailable while the environment provisions, and the copy must still be written.
 - Trade-off: the artifact copy uses the host of the project, not the host of the thread. On a single-host setup they are the same machine.
 - `artifactDir` in `src/runtime/artifacts.ts`: when the caller names the host, Chief does not ask bb for the storage location of the thread.
 - Cleanup clears only the thread storage. The artifacts survive.
-  Reason: the retro grades from the artifact brief and from `chief_completions`, not from storage that cleanup clears.
+  Reason: the artifact brief and the completion snapshot are the durable evidence, and they must outlive cleanup.
+- Every Chief artifact goes through `atomicWrite` in `src/runtime/artifacts.ts`. The write replaces an existing file at the same path.
+  1. `atomicWrite` writes the text to `<path>.tmp-<uuid>`.
+  2. It moves the tmp file to the path.
+  3. When the move fails with a message that matches `/already exists/i`, it removes the destination file and moves once more.
+  4. Any other move error, or a failure of the second move, removes the tmp file and throws the error.
+- The code finds an existing destination by the text of the host message. When the host changes that text, an overwrite fails with an error and loses no data.
+- The replace is remove then move. A reader can see the file missing for a short time.
+- A failed second move loses the old version. The caller sees the error and retries.
 
 ## Source adapters
 
@@ -238,7 +242,7 @@ Each adapter reads one evidence source and returns a section: `{name, status, no
 
 - The provider thread id comes from the newest `thread/identity` event (`data.providerThreadId`) of the thread.
 - The threads in scope are the `store.all()` rows with `updated_at >= since`.
-- `sentry` is `skipped` and makes no `fetch` when the token, the org or the project is unset. `sentryIssuesForTag(tag, value, days)` reuses the same call for the retro.
+- `sentry` is `skipped` and makes no `fetch` when the token, the org or the project is unset.
 - A missing provider file gives the note "not on this machine" for that thread.
   Reason: the plugin reads provider files on the plugin server only. Other hosts show this note.
 
@@ -270,7 +274,7 @@ Each adapter reads one evidence source and returns a section: `{name, status, no
 | `ok` | The db has rows, or it has zero rows and no `-wal` file. |
 
   Reason for `unavailable`: a live WAL returns no rows through `mode=ro`. An empty read must not look like a healthy history.
-- The `agy` adapter and the retro bundle both use this reader.
+- The `agy` adapter uses this reader.
 
 ## Daily report
 
@@ -284,10 +288,9 @@ Each adapter reads one evidence source and returns a section: `{name, status, no
 | Completion evidence | The completions in the window whose `diff_state` is not `ok`, with their notes. |
 | Recurring patterns | Patterns that occur 2 or more times. The top 15. |
 | Threads with failures | The threads that have the most failure items. |
+| Lessons | Proposed lessons that wait for a decision, grouped by surface; a surface with lessons from 2 or more distinct plans in 14 days is recurring and comes first. Then the counts of accepted and retired lessons. |
 | Logs | The items of the `bbLogs` adapter. |
 | Triage | A last line that tells Chief to plan any fix as normal work (`chief_plan`). |
-
-The retro adds the sections in "Report sections from the retro".
 
 - The report has at most 60,000 characters. When it is longer, the builder cuts whole items from the end of the longest section.
 - The builder scrubs the whole report.
@@ -296,236 +299,14 @@ The retro adds the sections in "Report sections from the retro".
 - Otherwise the run writes `reports/daily-<date>.md` in the storage of that Chief. It then sends one alert with the key `daily:<date>`.
 - A second run on the same date gives the same path and no second outbox row.
 - The alert text has the path, then the counts of new Sentry issues, recurring patterns, blocked workers, stalls and threads with 2 or more `request_changes` rows. It ends with the triage line.
+- The daily alert adds the count of proposed lessons that wait for a decision.
 - The run never throws. A failure logs a warning, and the next day runs again.
 - `alertSelf` in `src/runtime/alerts.ts` sends the alert. When the source of an alert equals its target, `deliverAlert` sends it without `senderThreadId`. When they differ, the alert still carries `senderThreadId = source_thread_id`.
   Reason: a thread cannot message itself as its own sender.
 
-## Retro grader
-
-The retro scores a finished plan. A read-only judge grades the threads of the plan and the handoffs between Chief and each child. The plugin then aggregates the scores, stores them and writes `retro.md`. It never edits a prompt or code.
-
-### Eligibility
-
-A planner gets one `chief_retros` row when all of these hold:
-
-- The planner is complete, and its `updated_at` is at or after `retros_since`.
-- The planner is not superseded. A superseded planner completes through `completeSuperseded`, and its waves never ran.
-- The plan has at least one complete worker.
-- The plan has an active Chief.
-
-The plugin seeds `retros_since` in `plugin_meta` at startup with `INSERT OR IGNORE` (`src/runtime/core.ts`). The seed is not in a migration.
-Reason: a plan that completed before the plugin first ran with this feature gets no retro, and there is no backfill.
-
-### State machine
-
-`retroTick(now)` in `src/observe/retro.ts` runs every 10 minutes (`bb.background.schedule("retro", "*/10 * * * *")`). One tick runs at a time. The tick does nothing when the setting `retroJudge` is off. The default is on.
-
-| From | Event | To |
-| --- | --- | --- |
-| no row | Claim. `INSERT OR IGNORE` of a planner that is eligible. | `pending`, `attempts=0`, `next_at=now` |
-| `pending` | Start. `next_at <= now`. At most 2 starts for each tick. The row first gets `attempts+1` and `run_id=NULL`. | `running` with a `run_id`, when the run launches |
-| `pending` | A bundle error or a launch error. | `pending` with `next_at=now+10 min`, or `failed` when `attempts >= 3` |
-| `running` | The run status cannot be read. | `running` with `last_error` |
-| `running` | The run failed, was stopped, or is older than 2 hours. The tick stops an old run first. | `pending` with `run_id=NULL` and `next_at=now+10 min`, or `failed` when `attempts >= 3` |
-| `running` | The run succeeded. | Collect, then `done` |
-| `running` | The run succeeded, collect failed (for example, a write error), and the run is older than 2 hours. The run is not stopped. | `pending` with `run_id=NULL` and `next_at=now+10 min`, or `failed` when `attempts >= 3` |
-
-- The primary key `plan_thread_id` makes the claim exclusive. Two overlapping ticks never create two rows or start two runs. A second tick on unchanged data inserts nothing.
-- Every retry is a new run with a new `run_id`.
-- A failed collect of a succeeded run leaves the row `running`. The next tick tries again, until the run is 2 hours old.
-  Reason: a persistent write error must not retry forever. After 2 hours the row uses the retry budget and ends in one `retro-failed` alert.
-- The state `failed` sends one alert with the key `retro-failed:<planId>`.
-- The row stores `rubric_version`, `attempts`, `next_at`, `started_at`, `last_error` and the `path` of `retro.md`.
-
-### Evidence bundle
-
-The bundle is written as Chief artifacts `retro/<planId>/…` under the Chief thread. Each file has at most 120,000 characters. Every line is scrubbed.
-
-- The limit applies to the whole file. A thread file counts its metadata, brief, diff and ledger lines first. The event lines then use the remaining characters.
-  Reason: the brief, the diff and the ledger lines add to the event lines, and a limit on the event lines alone allowed a larger file.
-- The manifest refs come from the event lines that the file keeps.
-
-- The judged threads are the planner, the rows with the `plan_thread_id`, and their reviewers and advisors.
-  - The judge scores at most 8 threads. Threads with a failure, a block, a nudge or a `request_changes` event come first. Then one thread for each role.
-  - The bundle names every dropped thread.
-- For each thread, the bundle keeps the first 400 events and the last 1,200 events. It marks the gap as `[events seq a..b omitted]`. Each line starts with `#<seq>`.
-  - The bundle always keeps every `userMessage`, every tool call whose status is not `completed`, and the final `chief_report` call.
-  - Expired outputs show as `[output expired]`. A failed event read gives the header `[events unavailable: reason]`.
-- For each thread, the bundle also holds its brief, its `chief_completions` row, the stat of `completion.diff`, its ledger events and its agy provider summary.
-  The brief comes from the artifact `brief.md`. It never comes from thread storage.
-  Reason: cleanup clears the thread storage and removes the environment. The bundle must still work after that.
-- The handoff bundle holds at most 8 handoffs. It has two sides.
-  - The Chief side holds the Chief events between the creation of the planner and the completion of the plan. These are the user messages, the `chief_*` tool calls that name a plan thread, and the `bb thread tell` commands to one.
-  - The child side holds the exact brief, the first 40 events, every question and blocked report, the alerts of the child, its nudges, and each `request_changes` round with the findings.
-  - A handoff with a missing side is marked `counterpart unavailable`.
-- The plugin computes the observed counts for each handoff: nudges, blocks, review rounds, brief characters, alert characters and estimated tokens. The judge never computes them.
-
-### Artifact writes (`atomicWrite` in `src/runtime/artifacts.ts`)
-
-Every Chief artifact goes through `atomicWrite`. The write replaces an existing file at the same path.
-
-1. `atomicWrite` writes the text to `<path>.tmp-<uuid>`.
-2. It moves the tmp file to the path.
-3. When the move fails with a message that matches `/already exists/i`, it removes the destination file and moves once more.
-4. Any other move error, or a failure of the second move, removes the tmp file and throws the error.
-
-- A retry of a retro writes `retro/<planId>/…` over the files of its own earlier attempt. The bundle of another plan is at other paths and stays unchanged.
-  Reason: the host move refuses an existing destination, and `FileMoveArgs` has no overwrite flag.
-- The code finds an existing destination by the text of the host message. When the host changes that text, an overwrite fails with an error and loses no data.
-- The replace is remove then move. A reader can see the file missing for a short time.
-- A failed second move loses the old version. The caller sees the error and retries.
-
-### Judge workflow
-
-- `RETRO_SCRIPT` is an inline workflow named `chief-retro-judge`. It reads only `args`. It never interpolates text into code.
-- The workflow runs in parallel one `agent()` for each judged thread and one communication `agent()` for the handoff bundle. The total is at most 9 calls, capped by `budget().maxAgentCalls`.
-- The workflow uses the `research-helper` row of Chief models by machine when it is usable. Otherwise it uses the `researcher` row, and then the BB default. See `judgeModel` in `src/observe/retro.ts`.
-- `runWorkflowCli` in `src/research/workflowCli.ts` runs, polls and stops the workflow. Only the retro judge uses it. The function keeps its arguments, its environment, its timeout and its error mapping.
-- Each agent returns scores with labels, reasons and evidence references of the form `thr_x#seq`. It may also return one lesson.
-- The prompt says: return lesson null unless all four filing conditions hold. No change is a valid result.
-- The result schemas of the agents use only the safe schema subset of the workflows host. They hold no `anyOf`, `oneOf`, `allOf`, `$ref`, `pattern` or `format`.
-  - A value that can be null uses a type array, for example `type: ["string", "null"]`.
-  Reason: the host rejects other keywords inside `agent()` before it creates a call. A bad schema then fails every call, and the run records zero calls.
-- When every call fails, the run error starts with `All N judge calls failed:`. It then names the distinct errors that `agent()` raised, cut to 600 characters.
-  - When no call raised an error, the run error says that the calls returned no result.
-  Reason: `settle` stores the run error in `last_error` and in the `retro-failed` alert. The error must show the real cause.
-- When some calls fail and at least one succeeds, the result stays `{threads, communication, lost}`. `lost` counts the calls with no result.
-
-### Collect
-
-One owner collects a successful run. The collect step is idempotent.
-
-1. Parse the result with `zod`, then validate it. Each rule below drops or downgrades the item that breaks it.
-   - A per-thread result whose `threadId` was not requested is dropped.
-   - A thread has at most one result. Duplicates are dropped and noted.
-   - A scorer appears at most once, and only for a role that the rubric covers.
-   - A label must be in its rubric.
-   - A missing applicable rubric counts as `insufficient_evidence`.
-   - A handoff `threadId` must be in the handoff set.
-   - A thread with no valid score is `insufficient`. It is never `pass`.
-2. Keep a lesson only when all of these hold:
-   - The thread or handoff that it came from has the status `fail`.
-   - Every field is non-empty, and `existingInstruction` is null.
-   - Every evidence reference names a `#seq` that exists in the bundle.
-   - The surface is in `SURFACES`.
-3. Write `retro/<planId>/retro.md`. A repeat run overwrites it.
-4. In one transaction:
-   1. Upsert the `chief_scores` rows.
-   2. `INSERT OR IGNORE` the proposed lessons.
-   3. `UPDATE chief_retros` to `done` and set `path`, where `state='running'` and the `run_id` matches.
-   4. Insert the alert `retro:<planId>`.
-5. After the commit, deliver the alert.
-
-- When the update in step 4 changes no row, the transaction rolls back. Another collector won.
-  Reason: a second collect must change nothing.
-- A failed write of `retro.md` leaves the row `running`. The next tick retries within the 2-hour bound.
-- A failed delivery goes to the alert outbox retry.
-- A second collect of the same run gives the same `chief_scores` rows, one lesson for each `proposal_key`, one outbox row and `state='done'`.
-- The alert text is: `Retro for plan “<title>”: <path>. <f>/<n> threads failed, <i> insufficient. <k> proposed lessons (bb chief lessons --status proposed; accept or retire with a reason).`
-- `retro.md` holds:
-  - a table of thread, role, the label and raw score of each scorer, overall and status
-  - a table of handoff, label, observed counts, judge-attributed signals and evidence
-  - the reasons
-  - the Sentry issues tagged with the `plan_thread_id`, from `sentryIssuesForTag`
-  - the summary of the plan ledger events
-  - the state of the completion evidence
-  - the proposed lessons and the dropped lessons, each dropped lesson with its reason
-
-## Rubrics and scoring
-
-`src/observe/rubrics.ts` holds the rubrics. It is the one source of truth for both the judge prompt and the aggregation.
-
-- `RUBRIC_VERSION` names the version of the rubric set. Chief stores every score with its version.
-- `renderRubric(r)` writes a rubric as a YAML `labels:` block, an `Assess:` list and a rule for the reason (1 to 3 sentences that cite specifics).
-- Every rubric has the label `insufficient_evidence`, with no score.
-- The design follows the `skill-doctor` skill of warpdotdev/common-skills at commit `8792394ff1b655e0af451b8fabb68ef0cfcbd208` (MIT licence). The wording is adapted to Chief. The code keeps the attribution comment.
-
-| Rubric | Applies to | Weight | Labels and scores |
-| --- | --- | --- | --- |
-| `efficiency` | every thread | 0.25 | `highly_efficient` 1, `mostly_efficient` 0.8, `mostly_inefficient` 0.4, `highly_inefficient` 0.2 |
-| `procedure-compliance` | every thread | 0.20 | `fully_compliant` 1, `mostly_compliant` 0.8, `noncompliant` 0.2 |
-| `verbosity` | every thread | 0.15 | `proportionate` 1, `verbose` 0.2, `terse` 0.1 |
-| `communication` | handoff | 0.25 | `clear` 1, `minor_gaps` 0.7, `costly_gaps` 0.4, `broken` 0.1 |
-
-`efficiency` counts failed and wasted tool calls. The `test-redundancy` rubric is removed, and `aggregate` gives a stored score of an unknown rubric the weight 0. Reason: stored scores stay readable.
-
-### Aggregation
-
-`aggregate(scores)` is a pure function for one thread.
-
-- A score is applicable and valid when its label is not `not_applicable` and not `insufficient_evidence`.
-- The curve is `curve(s) = 0.5 + 0.5·s`.
-- `overall = Σ w·curve(raw) / Σ w`, over the applicable dimensions that have a score. The weights are renormalized.
-  The overall is not the `skill-doctor` overall. Chief omits code quality and skill coverage, because the reviewer owns the code.
-- The thread fails when any applicable raw score is below 0.5. A raw score of exactly 0.5 does not fail.
-- The status is `fail` when the thread fails. Else the status is `insufficient` when any applicable rubric is missing or `insufficient_evidence`, or when the thread has no scores. Else the status is `pass`.
-- `aggregate` returns the raw and the curved values.
-- Worked example: `efficiency` 0.8, `procedure-compliance` 1 and `verbosity` 0.2. The thread fails. The curved values are 0.9, 1 and 0.6. The overall is (0.225 + 0.2 + 0.09) / 0.6 = 0.8583.
-
-### Storage
-
-- `chief_scores` has the primary key (`thread_id`, `scorer`, `rubric_version`). Its columns also include `plan_thread_id`, `role`, `label`, `score`, `reason` and `at`.
-- `score` is NULL for `not_applicable` and `insufficient_evidence`.
-- A trend never averages scores across `rubric_version`.
-  Reason: a changed rubric makes the numbers not comparable.
-
-## Communication rubric
-
-The `communication` rubric scores one handoff. The plugin stores the score on the child thread. The rubric covers briefs, plan missions, alerts, nudges and `bb thread tell`.
-
-The judge assesses six signals:
-
-1. A gap in the brief that caused a block or a question.
-2. Information that either side asked for twice.
-3. Nudges. The plugin observes the count. The judge attributes a cause only with evidence. A legitimate nudge is not waste.
-4. Review rounds that an unclear brief caused, not an error of the worker.
-5. The size of the handoff, in brief and alert characters. Tokens are an estimate of characters ÷ 4, and the report labels them "estimate".
-6. Loss or distortion of the words of the user between the user messages to Chief and the delegated brief or mission.
-
-- The reason cites `threadId#seq` on both sides.
-- Observed counts and judge-attributed causes stay separate in `retro.md` and in the daily report.
-- A handoff with a missing counterpart gets `insufficient_evidence`. It never gets `clear`.
-  Reason: a handoff that the judge cannot see is not proof of a good handoff.
-- Chief never calibrates the communication rubric against reviewer verdicts.
-
-## Report sections from the retro
-
-The daily report adds these sections. None of them averages scores across `rubric_version`.
-
-| Section | Content |
-| --- | --- |
-| Score trend | The last 4 ISO weeks. For each scorer and `rubric_version`: the raw mean, `curve(mean)`, n, and the counts of pass, fail and insufficient. |
-| Communication | Seven days. The observed totals (nudges, blocks, review rounds, mean brief characters, mean estimated tokens), then the judge-attributed signal counts, shown apart. |
-| Calibration | The judge against the first reviewer verdict. See below. |
-| Failed threads | The last 24 hours. For each thread: the role, the failing scorer and the reason. |
-| Lessons | See "Lesson effect". |
-
-### Calibration
-
-- The report joins the worker threads that the judge graded at the current version to `reviewer_verdicts` on `worker_thread_id`.
-- The verdict is the first row by `id` whose `head_sha` and `worker_report_seq` are both non-null. A row with a null in either column is counted as unbound and excluded.
-- The status of each worker is the `aggregate` status of its applicable rubrics, without `communication`.
-  - A valid applicable raw score below 0.5 makes the worker `fail`. A missing or `insufficient_evidence` dimension does not change this.
-  - Without such a score, a missing or `insufficient_evidence` dimension makes the worker `insufficient`.
-  - Without such a score, a worker with no valid scored dimension is `insufficient`. This includes a worker whose applicable rubrics all have the label `not_applicable`: that label removes a rubric from the set and adds no score.
-  - Only a worker with at least one valid score, no failing score and no missing or `insufficient_evidence` dimension is `pass`.
-  Reason: incomplete evidence cannot establish a pass, but it cannot erase an established fail.
-- The report shows a 2×2 table of the judge status (pass or fail) against the first verdict (`approve` or `request_changes`). It also shows the coverage (bound pass or fail workers ÷ all judged pass or fail workers) and the rate of disagreement.
-- Workers with the status `insufficient` are outside the matrix. They are in neither count of the coverage. The report gives their number on its own.
-- Below 10 bound pairs, the report prints `insufficient evidence (n=…)`.
-  Reason: a small sample gives a misleading rate.
-
-### Lesson effect
-
-- Proposed lessons that wait for a decision, grouped by surface. A lesson that comes from 2 or more distinct plans in 14 days is recurring, and the report lists it first.
-- The counts of accepted and retired lessons.
-- For each lesson accepted in the last 30 days: the pass rate of the judged threads in the 14 days before and after `decided_at`, with n. When either side has fewer than 5 threads, the report shows "too few (n<5)".
-- The daily alert adds the line `<k> proposed lessons awaiting decision`.
-- The report claims no cause. A pass rate before and after is not proof that a lesson helped.
-
 ## Lesson lifecycle
 
-`chief_lessons` is the one store of lessons. A reviewer or advisor report with a `lesson`, and the retro, both write to it.
+`chief_lessons` is the one store of lessons. A reviewer or advisor report with a `lesson` writes to it.
 
 | Status | Meaning |
 | --- | --- |
@@ -535,28 +316,8 @@ The daily report adds these sections. None of them averages scores across `rubri
 
 - A lesson goes from `proposed` to `accepted`, and from `accepted` to `retired`. A lesson goes from `proposed` to `retired` when Chief rejects it. No other transition exists.
 - The migration adds `status` with the default `accepted`. Existing rows stay accepted, so they keep their injection.
-- The migration also adds `surface`, `plan_thread_id`, `evidence`, `rubric_version`, `proposal_key`, `decided_at` and `decided_reason`. A unique index covers `proposal_key`. A NULL key is not constrained.
+- The migration also adds `surface`, `plan_thread_id`, `evidence`, `rubric_version`, `proposal_key`, `decided_at` and `decided_reason`. A unique index covers `proposal_key`. A NULL key is not constrained. Only older retro rows hold values in `surface`, `plan_thread_id`, `evidence`, `rubric_version` and `proposal_key`.
 - The report intake (`src/report/reportIntake.ts`) inserts a lesson as `proposed`. Its report alert adds the line `Proposed lesson <id>: bb chief lesson accept <id> --reason "…" (or retire)`.
-- The retro inserts a lesson as `proposed`, with `proposal_key = sha1(plan_thread_id, source thread, surface, normalize(rule))`. `INSERT OR IGNORE` gives one lesson for each key.
-
-### Filing bar
-
-The judge may file a lesson only when all four conditions hold. The plugin checks the form of each condition in Collect.
-
-1. An instruction is missing or wrong on a nameable surface.
-2. One reusable rule fixes it.
-3. The rule would have prevented the failure.
-4. The failure recurs, or it is severe.
-
-The judge never files a lesson when the instruction existed and the thread ignored it, for variance, to restate an instruction, or when the fix is code or infrastructure.
-
-`SURFACES` in `src/observe/rubrics.ts` lists `chief` and `role-instructions`, plus `planner-prompt`, `worker-brief`, `reviewer-brief`, `chief-delegate-brief`, `chief-plan-mission`, `chief-alert-text`, `chief-nudge`, `chief-tell`, `report-contract`, `plugin-code` and `other`. The surface sets the role of the lesson. `lessonRole` maps each removed skill name to `null`. Reason: stored rows stay valid.
-
-| Surface | Lesson role |
-| --- | --- |
-| `reviewer-brief` | `reviewer` |
-| `chief`, `chief-delegate-brief`, `chief-plan-mission`, `chief-alert-text`, `chief-nudge`, `chief-tell` | `chief` |
-| every other surface | NULL, so every managed role |
 
 ### Injection (`newestLessons` in `src/runtime/host.ts`)
 
@@ -576,15 +337,21 @@ The judge never files a lesson when the instruction existed and the thread ignor
 - The reason is required. It is not empty and has at most 400 characters.
 - Each command sets `decided_at` and `decided_reason`.
 - An invalid transition exits with a non-zero code and changes nothing.
-- The retro alert and the daily report point to these commands.
+- The report alert and the daily report point to these commands.
 
 ### Invariant: Chief never edits itself
 
 - The plugin never edits a prompt or code.
-- The retro writes only these items: `chief_retros`, `chief_scores`, `chief_lessons` rows with status `proposed`, the Chief artifacts `retro/`, the `reports/` of the Chief, and `alert_outbox`.
-- A lesson reaches a prompt only after a recorded Chief decision. Reason: a lesson from a judge or a reviewer can be wrong. A durable fix still ships as a reviewed plan.
+- A lesson reaches a prompt only after a recorded Chief decision. Reason: a lesson from a reviewer or an advisor can be wrong. A durable fix still ships as a reviewed plan.
+
+## Retired retro data
+
+- `chief_retros`, `chief_scores` and the `retros_since` row of `plugin_meta` remain in the database from earlier versions. No code reads or writes them.
+- Lessons that the retro filed (rows with `rubric_version` set) stay ordinary `chief_lessons` rows and follow the same lifecycle.
+- Reason: the owner allows no destructive migration.
 
 ## Related decisions
 
 - [Sentry through a direct envelope, no SDK](../decisions/2026-11-13-sentry-envelope-no-sdk.md)
 - [One gated lesson store](../decisions/2026-11-13-lesson-lifecycle-gate.md)
+- [Remove the retro judge](../decisions/2026-11-26-remove-retro-judge.md)

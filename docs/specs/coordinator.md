@@ -417,7 +417,7 @@ The supervisor is the plugin service that reconciles managed rows, sends the pro
 - The first `configure` call for a just-spawned child can run before its insert. It then sees a plain Chief and offers `chief_coordinate` for one turn. The store predicates in COORD-1 and COORD-4 keep this safe.
 - The done check scans linked children on every sweep pass. It writes only through `INSERT OR IGNORE` and does not reload the store.
 - Cross-project delivery uses a child thread as `senderThreadId` for a Coordinator in another project. The same path serves an alert within one project.
-- Outbox rows in `alert_outbox` are never pruned. Delivered rows serve as once-only receipts for research alerts, thread failure events, done notices, and retro evidence.
+- Outbox rows in `alert_outbox` are never pruned. Delivered rows serve as once-only receipts for research alerts, thread failure events, and done notices.
 - The need-you receipt is tracked per child turn. A child that repeats the same pending Need you in a later turn alerts again. This repetition is accepted over losing a genuine re-ask. The "needs the owner" status clears when the child next becomes active.
 - An unlinked project Chief that receives work from an orphaned child becomes that Coordinator's child, keeping its own work.
 
