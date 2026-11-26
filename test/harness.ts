@@ -84,7 +84,7 @@ export function catalogModel(model: string, reasoningEfforts = ["medium", "high"
 export async function setup(options: { /** projects.get rejects these ids, as the host does for a project that does not exist. */ missingProjects?: string[]; rules?: string; hostStatus?: string; providerAvailable?: boolean; /** providers.list rejects, as when discovery is down. */ providerListFails?: boolean; /** The plugin build under test; defaults to this checkout (the base-preservation tests pass the 95aa7df build). */ module?: typeof plugin; projectPath?: string; pluginId?: string; usageLimits?: (args: any) => unknown; system?: object;
   /** tabs.update fails this many times from the start, so a plugin start can meet it. */
   failTabsUpdates?: number;
-  /** The host accepts writes and reads under <data dir>/chief/heavy/ on host_1, so heavy-command slots can be published; without it that publish fails, as for any other host_1 path. */
+  /** The host accepts writes and reads under <data dir>/chief/heavy/ and <data dir>/chief/guard/ on host_1, so heavy-command slots and the command guard can be published; without it that publish fails, as for any other host_1 path. */
   heavyFiles?: boolean;
   /** Runs on the migrated database right before the plugin starts: seeds state a restart would find. */
   seed?: (ctx: { bb: any; db: any; live: Map<string, any>; tabsStore: Map<string, { revision: number; tabs: any[] }> }) => void;
@@ -166,7 +166,7 @@ export async function setup(options: { /** projects.get rejects these ids, as th
           const attemptFolder = /\/review-\d+\/[0-9a-f]{8}\//.test(path);
           // A brief's Chief artifact copy goes to the project's host (host_1) without asking for the thread's storage location.
           const briefArtifact = /\/brief\.md\.tmp-/.test(path);
-          const heavyFolder = options.heavyFiles && /\/chief\/heavy\//.test(path);
+          const heavyFolder = options.heavyFiles && /\/chief\/(heavy|guard)\//.test(path);
           if (hostId !== "host_storage" && !((attemptFolder || briefArtifact || heavyFolder) && hostId === "host_1")) throw new Error(`wrote ${path} to host ${hostId}`);
           await mkdir(dirname(path), { recursive: true });
           await writeFile(path, content);

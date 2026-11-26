@@ -239,6 +239,14 @@ Chief can mirror its work to a task tracker. It is off by default.
 - Answers: the plugin polls the task. One owner comment answers one decision (start it with `#N` when several are open) and reaches Chief once, as a lifecycle alert, through the plugin only. The tracker's own notify setting plays no part, and Chief never runs tracker commands.
 - Switching `tracker` off deletes nothing and stops every tracker call. Switching it back on resumes pending work.
 
+## Command guard
+
+Chief workers, designers and spec-writers must run every command in the foreground and without `| tail` or `| head`, so you see progress in the thread. A guard refuses a Bash call that pipes into `tail` or `head`, runs in the background (`run_in_background`, `&`, `nohup`, `disown`, `setsid`), and tells the worker to rerun it. Text in quotes, heredoc bodies and comments are ignored. Your own threads and the other Chief roles are never affected.
+
+- Enforced on claude-code (a `~/.claude/settings.json` hook) and on pi and acp-omp (`~/.pi/agent/extensions/chief-guard.ts`). acp-agy has no pre-tool hook, so it relies on the brief rules only.
+- Run `bash <BB data dir>/chief/guard/install.sh` once per host. The first worker delegation publishes it. It adds one hook entry, keeps every other setting, saves the original as `settings.json.chief-guard.bak`, and can run again safely.
+- The guard fails open: bad input, a missing node or a missing script lets the command run.
+
 ## Coordinator
 
 Ask a Chief to make itself a Coordinator. It calls the `chief_coordinate` tool, then `chief_attach` to take child Chiefs. There is no slash command. The upgrade is one-way, and only a Chief that owns no open work can take it.

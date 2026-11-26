@@ -4,6 +4,7 @@ import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
+import { guardScript, guardShim, installScript, piExtension } from "../src/research/commandGuard";
 import { heavyScript } from "../src/research/heavySlots";
 import { createArtifacts } from "../src/runtime/artifacts";
 
@@ -40,8 +41,8 @@ async function world(moveFails: (call: number) => Error | undefined = () => unde
     onDispose: () => undefined, log: { warn: (message: string) => warnings.push(message) },
     sdk: { files, hosts, threads: { storageLocation: async () => { storageCalls.push("storageLocation"); return { hostId: "host_1", storageRootPath: extra.storage ?? root }; } } },
   };
-  const { writeStorageFile, publishHeavy, writeArtifact } = createArtifacts({ bb, db: extra.db ?? {}, state: { dataDirs: new Map() } } as never);
-  return { root, calls, warnings, storageCalls, publishHeavy, writeArtifact, write: (content: string) => writeStorageFile("thr_1", "out/file.md", content), path: join(root, "out/file.md") };
+  const { writeStorageFile, publishHeavy, publishGuard, markGuarded, writeArtifact } = createArtifacts({ bb, db: extra.db ?? {}, state: { dataDirs: new Map() } } as never);
+  return { root, calls, warnings, storageCalls, publishHeavy, publishGuard, markGuarded, writeArtifact, write: (content: string) => writeStorageFile("thr_1", "out/file.md", content), path: join(root, "out/file.md") };
 }
 
 describe("atomicWrite", () => {
@@ -146,6 +147,51 @@ describe("publishHeavy", () => {
   test("an unknown data dir throws and writes nothing", async () => {
     const w = await world(undefined, false);
     await expect(w.publishHeavy("host_1", 2)).rejects.toThrow(/data dir is unavailable/);
+    expect(w.calls).toEqual([]);
+  });
+});
+
+// Contracts (docs/specs/plan-chains.md "Command Guard"): the guard files live in <BB data dir>/chief/guard/ under stable names and are rewritten only
+// when their text differs; a worker's marker is threads/<thread id> in that folder; both throw when the data dir is unknown.
+describe("publishGuard and markGuarded", () => {
+  const guardOf = (root: string) => join(root, "chief", "guard");
+  const expected = (root: string) => ({
+    "guard.sh": guardShim(), "guard.mjs": guardScript(), "pi-extension.ts": piExtension(join(guardOf(root), "guard.sh")), "install.sh": installScript(guardOf(root)),
+  });
+
+  test("publishes the four files and returns the folder", async () => {
+    const w = await world();
+    expect(await w.publishGuard("host_1")).toBe(guardOf(w.root));
+    for (const [name, text] of Object.entries(expected(w.root))) expect(await readFile(join(guardOf(w.root), name), "utf8")).toBe(text);
+    expect((await readdir(guardOf(w.root))).sort()).toEqual(["guard.mjs", "guard.sh", "install.sh", "pi-extension.ts"]);
+  });
+
+  test("a second publish writes nothing; a changed file is replaced at the same path and the others are not touched", async () => {
+    const w = await world();
+    await w.publishGuard("host_1");
+    w.calls.length = 0;
+    await w.publishGuard("host_1");
+    expect(w.calls).toEqual([]);
+    const changed = join(guardOf(w.root), "guard.mjs");
+    await writeFile(changed, "// edited by hand\n");
+    await w.publishGuard("host_1");
+    expect(await readFile(changed, "utf8")).toBe(guardScript());
+    expect(w.calls.filter((call) => call.startsWith("write ")).map((call) => call.replace(/^write |\.tmp-.*$/g, ""))).toEqual([changed]);
+    expect((await readdir(guardOf(w.root))).filter((name) => name.includes(".tmp-"))).toEqual([]);
+  });
+
+  test("markGuarded writes threads/<thread id> holding the id, and writing it again succeeds", async () => {
+    const w = await world();
+    const marker = join(guardOf(w.root), "threads", "thr_9");
+    expect(await w.markGuarded("host_1", "thr_9")).toBe(marker);
+    expect(await readFile(marker, "utf8")).toBe("thr_9\n");
+    await expect(w.markGuarded("host_1", "thr_9")).resolves.toBe(marker);
+  });
+
+  test("an unknown data dir throws for both and writes nothing", async () => {
+    const w = await world(undefined, false);
+    await expect(w.publishGuard("host_1")).rejects.toThrow(/data dir is unavailable/);
+    await expect(w.markGuarded("host_1", "thr_9")).rejects.toThrow(/data dir is unavailable/);
     expect(w.calls).toEqual([]);
   });
 });

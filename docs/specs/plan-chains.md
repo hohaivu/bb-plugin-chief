@@ -474,6 +474,59 @@ Known limits:
 - An agent can bypass the wrapper. See the [decision on the slot wrapper](../decisions/2026-11-18-heavy-slots-host-capacity.md).
 - Two BB data roots on one computer do not share slots. The supported setup is one data root per host.
 
+### Command Guard
+
+The command guard refuses some shell commands that a Chief worker runs. It keeps worker progress visible in the owner's thread. Reason: the owner watches the thread, and piped or background output hides progress.
+
+Terms used in this section:
+
+- **Marker**: a file named after a thread ID, under `<BB data dir>/chief/guard/threads/`. Its content is that ID. It marks a Chief worker.
+- **Provider hook**: a hook that an agent provider runs before each Bash call.
+
+Publishing and marking:
+
+- `startWorker` (`src/runtime/delegation.ts`) publishes the guard files to `<BB data dir>/chief/guard/`: `guard.sh`, `guard.mjs`, `pi-extension.ts` and `install.sh`. Reason: the provider hooks need the files on disk.
+- `publishGuard` rewrites a file only when its content differs. Reason: the file names stay stable, so the hook commands stay valid.
+- After the spawn, `startWorker` writes the marker `threads/<threadId>` for every worker, designer and spec-writer. Reason: the guard acts only for Chief workers.
+- No other spawn path writes a marker. Reason: planner, reviewer, advisor, researcher and Chief sessions run without the guard.
+- A failed publish or marker write logs one warning and does not stop the delegation. Reason: the guard adds enforcement on top of the brief rules.
+
+Guard behavior:
+
+- `guard.sh` exits 0 at once when `BB_THREAD_ID` is unset or has no marker. Reason: the owner's own threads never start Node.
+- `guard.mjs` refuses a Bash call with exit 2 when it finds one of these forms:
+  - `run_in_background` is `true`.
+  - A pipe into `tail` or `head`. Only `|` and `|&` count, not `||`. An absolute path such as `/usr/bin/tail` also counts.
+  - A `&` job separator. `&&`, `&>`, `>&`, `<&` and `2>&1` do not count.
+  - `nohup`, `disown` or `setsid` as a whole word.
+
+  Reason: each form runs a command outside the foreground or hides its output.
+- A refusal writes one line to stderr that starts with `[chief-guard]`. The line names the reason and tells the worker how to rerun. Reason: the worker needs a next step.
+- `guard.mjs` ignores text in quotes, heredoc bodies and comments. Reason: commit messages and grep patterns contain `|` and `&` as plain text.
+- The guard reads only the command text. Reason: the heavy wrapper runs its own `tail` and `head` inside its script.
+- The guard fails open: unreadable input, a non-Bash tool, a missing Node or a missing script lets the command run. Reason: a guard failure must not stop worker progress.
+
+Providers:
+
+- claude-code enforces the guard through a `PreToolUse` Bash hook in `~/.claude/settings.json`.
+- pi and acp-omp enforce the guard through `~/.pi/agent/extensions/chief-guard.ts`, which runs `guard.sh` on each Bash call.
+- acp-agy has no known provider hook. The brief rules are its only enforcement.
+- The owner runs `install.sh` once per host. Reason: Chief does not edit the owner's global agent settings.
+- `install.sh` adds one `PreToolUse` entry unless a guard entry exists. It keeps every other key and hook. Reason: the owner's own hooks stay intact.
+- When the settings file exists, `install.sh` saves it as `settings.json.chief-guard.bak` before its first change. Reason: the owner can restore the original.
+- `install.sh` writes nothing when the settings file is not valid JSON. Reason: a parse failure must not drop the owner's hooks.
+- Running `install.sh` again changes nothing. Reason: the script is idempotent.
+
+Known limits:
+
+- A worker's first Bash call can run before its marker exists. Reason: the marker is written after the spawn returns. Accepted: a worker reads its brief and code first.
+- Quoted commands such as `bash -c "x | tail"` pass. Reason: quoted text is skipped to avoid refusing commit messages. Upgrade when workers nest shell commands in quotes.
+- A bare `&` in arithmetic, such as `$(( a & b ))`, is refused. Reason: the check cannot tell arithmetic from a job separator. The worker rewrites the expression.
+- A worker that needs a background server is refused. It reports blocked, and Chief decides.
+- The pi and acp-omp hooks are not checked in a live BB session. Reason: the owner's manual check after merge covers them.
+
+Decision on the provider hooks: [Command guard runs in provider hooks](../decisions/2026-11-25-command-guard-provider-hooks.md).
+
 ### Approved Design Binding
 
 - `chief_plan` with `researchThreadId` refuses an unknown thread, a non-researcher, a light researcher, a researcher owned by another Chief, or a researcher without a ready approval. These checks occur before checkout freshen, planner spawn or planner row insertion.
@@ -511,6 +564,7 @@ Known limits:
 - [Only a Spec Writer changes docs](../decisions/2026-11-10-docs-owned-by-spec-writer.md)
 - [Stacked chains use a stackOn field](../decisions/2026-11-14-stacked-chains-stackon.md)
 - [Heavy commands run through a host slot wrapper](../decisions/2026-11-18-heavy-slots-host-capacity.md)
+- [Command guard runs in provider hooks, scoped by marker files](../decisions/2026-11-25-command-guard-provider-hooks.md)
 - [One review gate per plan](../decisions/2026-11-18-single-review-gate.md)
 - [Workers write and run their tests, no tester](../decisions/2026-11-19-workers-write-tests.md)
 - [Horizontal block waves may waive tests](../decisions/2026-11-24-horizontal-block-test-waiver.md)
