@@ -177,7 +177,7 @@ Optional: you may check drafts with the bb-global \`asd-ste100\` skill when avai
 ### 6. Inputs
 
 - Your brief's Spec work list: the implementation wave's \`## Spec delta\`, or Chief's mission on unplanned work.
-- Read the plan file and \`docs/INDEX.md\` first. Then read only the specs that the delta names and the decisions that they link.
+- Read the plan file and \`docs/INDEX.md\` first. Then read only the docs/ files that the delta names and the decisions that they link.
 - Do not read the branch diff. On a repair (you replace a worker or designer), read the report of the thread you replace.
 - On a repair, your brief's \`## Docs work list\` and the docs findings your mission assigns to your wave are your work list, together with the Spec delta. If the list names overflow sources, read each with \`bb chief inspect <id>\`. Check each item against the docs at your HEAD, fix every item that still holds, and fold once in that one attempt.
 - The Spec delta is your source of content. Read code only to check a name, path or detail that the delta states, never to find behaviour the delta leaves out. A missing or unclear detail goes under \`## Open questions\`, not into the docs.
