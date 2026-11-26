@@ -163,10 +163,12 @@ export function createNextAction(ctx: Ctx) {
         const writers = store.all().filter((other) => other.role === "worker" && isWriter(other.kind) && !schedule.sideLane(other) && !terminal(other.state)
           && ledger.taskChain(other.thread_id).some((id) => ids.includes(id))).map((other) => other.thread_id);
         const completes = [...ids.filter((id) => store.get(id)?.state !== "complete"), ...writers].map((id) => `chief_complete (threadId: ${id})`).join("; ");
-        // The advisory re-review (a second reviewer since the gate opened) asked for changes: they do not reopen the passed gate.
-        if (gate.fixer_thread_id && reviewer?.verdict === "request_changes" && ledger.reviewersWithVerdict(ids, gate.created_at) > 1) {
-          const others = ids.filter((id) => id !== first);
-          return `The review gate already passed on fix run ${gate.fixer_thread_id}'s ready report. ${verdictRef}, the advisory re-review, returned request_changes: its findings are advisory, do not block, and reopen nothing. Next: ${completes}; each marks its pull request ready. Optional, to act on the findings after completing: chief_delegate (replaces: ${gate.fixer_thread_id}, kind: worker) with them as its mission${others.length ? `; a finding on another target's branch goes to chief_delegate (replaces: <that target>, kind: worker) for ${others.join(", ")}` : ""}.`;
+        // The advisory re-review asked for changes: they do not reopen the passed gate. Advisory means the reviewer launched after the fix run
+        // (a replacement initial reviewer predates it and keeps the plain line). The chat-fix call needs the fix run's open PR; a branch-only gate has none.
+        const fixer = store.get(gate.fixer_thread_id ?? "");
+        if (fixer && reviewer?.verdict === "request_changes" && reviewer.created_at > fixer.created_at) {
+          const chat = fixer.pr_url ? ` Optional, after completing, only while its pull request is open and unmerged: chief_delegate (replaces: ${fixer.thread_id}, kind: worker) with the findings${ids.length > 1 ? "; for another target's findings use replaces: that target, one of the ids above" : ""}.` : "";
+          return `The review gate passed on fix run ${fixer.thread_id}. ${verdictRef}, the advisory re-review, requested changes: advisory, they reopen nothing. Next: ${completes}.${chat}`;
         }
         return `The review gate passed. Complete ${ids.length > 1 ? "each target" : "it"}: ${completes}; each marks its pull request ready.`;
       }

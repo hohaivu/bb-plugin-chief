@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
-import { disposeAll } from "./harness";
+import { disposeAll, elapse, withoutAlertMarker } from "./harness";
 import { type GateWorld, gateWorld } from "./gateWorld";
 import { provideSdk } from "./sdk";
 
@@ -35,14 +35,26 @@ test("a stopped fix run without a report is replaced in its own environment", as
   expect(world.state.live.get(next.threadId)!.environmentId).toBe(environment);
 });
 
-test("a ready fix permits one advisory re-review even if it also requests changes", async () => {
-  const world = await gateWorld();
-  const { worker, reviewer } = await inFix(world);
+const PR = "https://github.com/acme/app/pull/7";
+
+/** A gate in fix with its fix run ready and the advisory re-review started and settled with request_changes. */
+async function advisoryRequestsChanges(world: GateWorld, extraTargets = 0, forge: { prUrl?: string } = { prUrl: PR }) {
+  const { worker, reviewer } = await world.gated("Fix checkout totals", forge);
+  await world.verdict(reviewer, "request_changes");
+  world.setIdle(reviewer);
+  const gate = world.gate();
+  const targets = JSON.parse(gate.targets);
+  const more = [] as string[];
+  for (let n = 0; n < extraTargets; n++) {
+    const extra = await world.worker(`Target ${n}`);
+    more.push(extra.threadId);
+    await world.ready(extra.threadId);
+  }
+  if (more.length) world.state.db.prepare("UPDATE review_gates SET targets=? WHERE gate_key=?").run(JSON.stringify([...targets, ...more.map((threadId) => ({ ...targets[0], threadId }))]), gate.gate_key);
   const fix = await world.delegateTo({ replaces: worker.threadId, kind: "worker" });
+  elapse(1000);
   await world.ready(fix.threadId);
-  const plain = String(await world.call("chief_roster", {}));
-  expect(plain).toContain(`chief_complete (threadId: ${worker.threadId})`);
-  expect(plain).not.toContain(`chief_delegate (replaces: ${fix.threadId}`);
+  elapse(1000);
   await world.open(worker.threadId);
   const second = world.gate().reviewer_thread_id;
   expect(second).not.toBe(reviewer);
@@ -51,6 +63,12 @@ test("a ready fix permits one advisory re-review even if it also requests change
   expect(world.gate().reviewer_thread_id).toBe(second);
   await world.verdict(second, "request_changes");
   world.setIdle(second);
+  return { worker, reviewer, fix, second, targets: [worker.threadId, ...more] };
+}
+
+test("a ready fix permits one advisory re-review even if it also requests changes", async () => {
+  const world = await gateWorld();
+  const { worker, fix, second } = await advisoryRequestsChanges(world);
   const advisory = String(await world.call("chief_roster", {}));
   expect(advisory).toContain(`chief_complete (threadId: ${worker.threadId})`);
   expect(advisory).toContain(`chief_delegate (replaces: ${fix.threadId}, kind: worker)`);
@@ -58,6 +76,41 @@ test("a ready fix permits one advisory re-review even if it also requests change
   expect(world.gate().reviewer_thread_id).toBe(second);
   await world.complete(worker.threadId);
   expect(world.row(worker.threadId).state).toBe("complete");
+});
+
+test("a branch-only gate's advisory alert keeps the completion call and offers no chat fix", async () => {
+  const world = await gateWorld();
+  const { worker, fix } = await advisoryRequestsChanges(world, 0, {});
+  const advisory = String(await world.call("chief_roster", {}));
+  expect(advisory).toContain(`chief_complete (threadId: ${worker.threadId})`);
+  expect(advisory).not.toContain(`chief_delegate (replaces: ${fix.threadId}`);
+});
+
+test("a replacement initial reviewer that requests changes is not an advisory re-review", async () => {
+  const world = await gateWorld();
+  const { worker, reviewer } = await world.gated("Fix checkout totals", { prUrl: PR });
+  await world.verdict(reviewer, "request_changes");
+  await world.block(reviewer); // a downed initial reviewer is replaced while the gate has no fix run
+  elapse(1000);
+  await world.open(worker.threadId);
+  const replacement = world.gate().reviewer_thread_id;
+  expect(replacement).not.toBe(reviewer);
+  await world.verdict(replacement, "request_changes");
+  world.setIdle(replacement);
+  elapse(1000);
+  const fix = await world.delegateTo({ replaces: worker.threadId, kind: "worker" });
+  await world.ready(fix.threadId);
+  const roster = String(await world.call("chief_roster", {}));
+  expect(roster).toContain(`chief_complete (threadId: ${worker.threadId})`);
+  expect(roster).not.toContain(`chief_delegate (replaces: ${fix.threadId}`);
+});
+
+test("the advisory alert at 16 targets keeps every completion call and the chat-fix call within the action room", async () => {
+  const world = await gateWorld();
+  const { fix, targets } = await advisoryRequestsChanges(world, 15);
+  const alert = withoutAlertMarker(world.state.sent.at(-1).input[0].text);
+  for (const id of targets) expect(alert).toContain(`chief_complete (threadId: ${id})`);
+  expect(alert).toContain(`chief_delegate (replaces: ${fix.threadId}, kind: worker)`);
 });
 
 describe("the gate's one fix run", () => {
