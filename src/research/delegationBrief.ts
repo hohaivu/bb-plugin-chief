@@ -342,7 +342,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ...(specWriter ? [
       "", "## Spec work",
       "- Planned: the `## Spec delta` of each spec: true wave is your work list. Unplanned: Chief's mission is your Spec delta; it names the docs and domains to change.",
-      "- Inputs: the plan file, docs/INDEX.md first, then only the specs the delta names and the decisions they link. Read code only to check a name or path the delta states; a gap goes under `## Open questions`.",
+      "- Inputs: the plan file, docs/INDEX.md first, then only the docs/ files the delta names and the decisions they link. Read code only to check a name or path the delta states; a gap goes under `## Open questions`.",
       ...(baseline ? ["- Baseline: a spec wave's plan file has a `## Spec baseline` heading. It names each new docs/specs file and the code paths it covers. For each named file that does not exist at your Base commit, first document the current behaviour of that code as the Baseline steps in your rules say, then apply the Spec delta. Behaviour that looks like a bug goes under `## Open questions` in your report, never into the docs as a contract."] : []),
       ...(prior && !isWriter(prior.kind) ? [`- Repair: Chief's mission is the docs fix. Read the report of the ${prior.kind ?? "worker"} you replace: bb chief inspect ${prior.thread_id}.`] : []),
       "- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start and as `Head commit: <sha>` when you report.",
